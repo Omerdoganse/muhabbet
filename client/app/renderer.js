@@ -140,6 +140,14 @@ const viewKey = (v) => (v.type === 'channel' ? 'c:' + v.id : 'd:' + v.name);
 const absUrl = (u) => S.serverUrl + u;
 const chName = (id) => S.textChannels.find((c) => c.id === id)?.name || S.voiceChannels.find((c) => c.id === id)?.name || id;
 const saveLastRead = () => localStorage.setItem('lastRead', JSON.stringify(S.lastRead));
+// Sohbeti olan her yer: yazı kanalları + ses odaları (geçici odalar ikisinde de var)
+const chatChannel = (id) => {
+  const t = S.textChannels.find((c) => c.id === id);
+  if (t) return t;
+  const v = S.voiceChannels.find((c) => c.id === id);
+  return v ? { ...v, voice: true } : null;
+};
+const allChatIds = () => [...new Set([...S.textChannels, ...S.voiceChannels].map((c) => c.id))];
 
 /* ---------------- Genel pencere ---------------- */
 let dialogClose = null;
@@ -251,7 +259,7 @@ function onInit(d) {
   S.voiceChannels = d.voiceChannels;
   S.users = d.users;
   S.history = d.history;
-  if (S.view.type === 'channel' && !S.textChannels.some((c) => c.id === S.view.id)) S.view = { type: 'channel', id: 'genel' };
+  if (S.view.type === 'channel' && !chatChannel(S.view.id)) S.view = { type: 'channel', id: 'genel' };
   $('#login').classList.add('hidden');
   $('#main').classList.remove('hidden');
   const me = userById(S.me);
@@ -263,11 +271,11 @@ function onInit(d) {
   $('#my-avatar').replaceWith(av);
   av.id = 'my-avatar';
   // Başka kanallarda kaçırılan mesaj sayıları
-  for (const c of S.textChannels) {
-    if (S.view.type === 'channel' && c.id === S.view.id) continue;
-    const since = S.lastRead[c.id] || 0;
-    const n = (S.history[c.id] || []).filter((m) => m.ts > since && !m.mine).length;
-    if (n) S.unread['c:' + c.id] = n;
+  for (const id of allChatIds()) {
+    if (S.view.type === 'channel' && id === S.view.id) continue;
+    const since = S.lastRead[id] || 0;
+    const n = (S.history[id] || []).filter((m) => m.ts > since && !m.mine).length;
+    if (n) S.unread['c:' + id] = n;
   }
   renderAll();
   // Yeniden bağlanınca bulunduğun ses kanalına geri dön
@@ -294,16 +302,16 @@ function onUsers(list) {
   renderMembers();
   renderDmList();
   renderMyStatus();
-  if (S.view.type === 'dm') renderHeader();
+  renderHeader();
   for (const p of S.peers.values()) applyPeerAudio(p);
 }
 
 function onChannels(d) {
   S.textChannels = d.textChannels;
   S.voiceChannels = d.voiceChannels;
-  for (const id of Object.keys(S.history)) if (!S.textChannels.some((c) => c.id === id)) delete S.history[id];
+  for (const id of Object.keys(S.history)) if (!chatChannel(id)) delete S.history[id];
   if (S.myVoice && !S.voiceChannels.some((c) => c.id === S.myVoice)) leaveVoice();
-  if (S.view.type === 'channel' && !S.textChannels.some((c) => c.id === S.view.id)) openView({ type: 'channel', id: 'genel' });
+  if (S.view.type === 'channel' && !chatChannel(S.view.id)) openView({ type: 'channel', id: 'genel' });
   else renderTextChannels();
   renderVoiceChannels();
 }
@@ -339,6 +347,7 @@ function onChat(msg) {
   if (!appendIfVisible(key, list, msg)) {
     S.unread[key] = (S.unread[key] || 0) + 1;
     renderTextChannels();
+    renderVoiceChannels();
   }
   if (!msg.mine && !document.hasFocus()) beep(900, 0.08);
 }
@@ -590,12 +599,17 @@ function renderHeader() {
   const input = $('#chat-input');
   $('#header-tools').classList.toggle('hidden', S.view.type !== 'channel');
   if (S.view.type === 'channel') {
-    const ch = S.textChannels.find((c) => c.id === S.view.id);
+    const ch = chatChannel(S.view.id);
     icon.className = 'chat-icon';
     icon.style.background = '';
-    icon.textContent = ch?.temp ? '⏳' : '#';
+    icon.textContent = ch?.temp ? '⏳' : ch?.voice ? '🔊' : '#';
     $('#chat-title').textContent = ch?.name || S.view.id;
-    $('#chat-sub').textContent = ch?.temp ? 'Geçici oda · son kişi çıkınca silinir' : 'Herkese açık kanal';
+    const inside = S.users.filter((u) => u.voice === S.view.id).length;
+    $('#chat-sub').textContent = ch?.temp
+      ? 'Geçici oda · son kişi çıkınca silinir'
+      : ch?.voice
+        ? `Ses odası sohbeti · ${inside ? inside + ' kişi içeride' : 'şu an kimse yok'}`
+        : 'Herkese açık kanal';
     input.placeholder = `#${ch?.name || S.view.id} kanalına mesaj yaz…`;
     input.disabled = false;
   } else {
@@ -653,6 +667,7 @@ function openView(view) {
   S.view = view;
   delete S.unread[viewKey(view)];
   renderTextChannels();
+  renderVoiceChannels();
   renderDmList();
   renderMessages();
   if (!$('#chat-input').disabled) $('#chat-input').focus();
@@ -919,11 +934,18 @@ function renderVoiceChannels() {
   const box = $('#voice-channels');
   box.replaceChildren();
   for (const ch of S.voiceChannels) {
-    const d = el('div', 'channel' + (ch.id === S.myVoice ? ' active' : ''));
+    const viewing = S.view.type === 'channel' && S.view.id === ch.id;
+    const d = el('div', 'channel' + (ch.id === S.myVoice || viewing ? ' active' : ''));
     d.append(el('span', 'ico', ch.temp ? '⏳' : '🔊'), el('span', null, ch.name));
     if (ch.temp) d.appendChild(el('span', 'temp-tag', 'geçici'));
-    d.title = 'Katılmak için tıkla';
-    d.onclick = () => joinVoice(ch.id);
+    const b = ch.temp ? null : badge('c:' + ch.id); // geçici odanın sayacı yazı kanallarında görünüyor
+    if (b) d.appendChild(b);
+    d.title = 'Katıl ve sohbetini aç';
+    // Ses odasına tıklayınca hem odaya girilir hem de o odanın sohbeti açılır
+    d.onclick = () => {
+      joinVoice(ch.id);
+      openView({ type: 'channel', id: ch.id });
+    };
     d.onmouseenter = () => showPeek(ch, d);
     d.onmouseleave = hidePeek;
     box.appendChild(d);
@@ -1466,6 +1488,7 @@ function openStage(mode, user) {
   if (S.stage.mode === 'yt' && mode !== 'yt') destroyYtPlayer();
   S.stage = { mode, user };
   $('#stage').classList.remove('hidden');
+  $('#stage-pip').classList.toggle('hidden', mode !== 'screen' || !document.pictureInPictureEnabled);
   $('#stage-video').classList.toggle('hidden', mode !== 'screen');
   $('#yt-wrap').classList.toggle('hidden', mode !== 'yt');
   $('#yt-panel').classList.toggle('hidden', mode !== 'yt');
@@ -1473,6 +1496,8 @@ function openStage(mode, user) {
 function closeStage() {
   if (S.stage.mode === 'yt') destroyYtPlayer();
   setFull(false);
+  if (document.pictureInPictureElement) document.exitPictureInPicture().catch(() => {});
+  $('#stage').classList.remove('pip');
   S.stage = { mode: null, user: null };
   $('#stage').classList.add('hidden');
   const v = $('#stage-video');
@@ -1492,6 +1517,63 @@ function setFull(on) {
   else if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
 }
 $('#stage-full').onclick = () => setFull(!$('#stage').classList.contains('full'));
+
+// Küçük köşe penceresi / büyük görünüm
+let stageSize = localStorage.getItem('stageSize') || 'mini';
+function applyStageSize() {
+  const st = $('#stage');
+  st.classList.toggle('mini', stageSize === 'mini');
+  st.style.left = st.style.top = st.style.right = '';
+  $('#stage-size').textContent = stageSize === 'mini' ? '⤢' : '⤡';
+  $('#stage-size').title = stageSize === 'mini' ? 'Büyüt (mesajların üstüne)' : 'Küçült (köşeye al)';
+}
+$('#stage-size').onclick = () => {
+  stageSize = stageSize === 'mini' ? 'large' : 'mini';
+  localStorage.setItem('stageSize', stageSize);
+  applyStageSize();
+};
+applyStageSize();
+
+// Köşe penceresini başlığından tutup sürükle
+$('#stage-head').addEventListener('mousedown', (e) => {
+  const st = $('#stage');
+  if (!st.classList.contains('mini') || st.classList.contains('full') || e.target.closest('button, input')) return;
+  e.preventDefault();
+  const chat = $('#chat').getBoundingClientRect();
+  const r = st.getBoundingClientRect();
+  const dx = e.clientX - r.left;
+  const dy = e.clientY - r.top;
+  const move = (ev) => {
+    const x = Math.min(Math.max(ev.clientX - dx - chat.left, 8), chat.width - r.width - 8);
+    const y = Math.min(Math.max(ev.clientY - dy - chat.top, 8), chat.height - r.height - 8);
+    st.style.right = 'auto';
+    st.style.left = x + 'px';
+    st.style.top = y + 'px';
+  };
+  const up = () => {
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+});
+
+// Ayrı pencere (resim içinde resim): oyunun da üstünde duran bağımsız küçük pencere
+$('#stage-pip').onclick = async () => {
+  const v = $('#stage-video');
+  try {
+    if (document.pictureInPictureElement) await document.exitPictureInPicture();
+    else await v.requestPictureInPicture();
+  } catch (err) {
+    toast('Ayrı pencere açılamadı: ' + err.message);
+  }
+};
+$('#stage-video').addEventListener('enterpictureinpicture', () => {
+  setFull(false);
+  $('#stage').classList.add('pip');
+  toast('⧉ Ayrı pencerede izleniyor. Kapatınca buraya geri gelir.');
+});
+$('#stage-video').addEventListener('leavepictureinpicture', () => $('#stage').classList.remove('pip'));
 $('#stage-body').ondblclick = () => setFull(!$('#stage').classList.contains('full'));
 document.addEventListener('fullscreenchange', () => {
   if (!document.fullscreenElement) setFull(false);

@@ -35,7 +35,8 @@ const io = new Server(server, { cors: { origin: '*' }, maxHttpBufferSize: 2e5 })
 
 const users = new Map(); // socketId -> kullanıcı
 const tempRooms = new Map(); // id -> { id, name, created, everJoined }
-const history = Object.fromEntries(FIXED_TEXT.map((c) => [c, []]));
+// Yazı kanallarının ve her ses odasının kendi sohbet geçmişi
+const history = Object.fromEntries([...FIXED_TEXT, ...FIXED_VOICE].map((c) => [c, []]));
 const yt = {}; // ses odası -> ortak izleme durumu
 const pomo = {}; // ses odası -> pomodoro durumu
 let msgCounter = 0;
@@ -46,7 +47,7 @@ const publicUser = (u) => ({
 });
 const userList = () => [...users.values()].map(publicUser);
 const broadcastUsers = () => io.emit('users', userList());
-const isText = (id) => FIXED_TEXT.includes(id) || tempRooms.has(id);
+const isText = (id) => FIXED_TEXT.includes(id) || FIXED_VOICE.includes(id) || tempRooms.has(id);
 const isVoice = (id) => FIXED_VOICE.includes(id) || tempRooms.has(id);
 const voiceMembers = (ch) => [...users.values()].filter((u) => u.voice === ch);
 function channelList() {
