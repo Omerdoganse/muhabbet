@@ -31,8 +31,9 @@ jobs:
           APP=$(ls dist/*.AppImage)
           chmod +x "$APP"
           xvfb-run -a "$APP" --appimage-extract-and-run --no-sandbox --remote-debugging-port=9222 > app.log 2>&1 &
-          for i in $(seq 1 30); do
-            if curl -s http://127.0.0.1:9222/json | grep -q '"type": "page"'; then break; fi
+          # Sayfanın başlığı "Muhabbet" olana kadar (tam yüklenene kadar) bekle
+          for i in $(seq 1 45); do
+            if curl -s http://127.0.0.1:9222/json | grep -q '"title": "Muhabbet"'; then break; fi
             sleep 2
           done
           echo "--- Açık sayfalar ---"
