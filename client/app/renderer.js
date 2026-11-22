@@ -722,6 +722,7 @@ chatEl.addEventListener('drop', (e) => {
 $('#lightbox').onclick = () => $('#lightbox').classList.add('hidden');
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
+    setFull(false);
     $('#lightbox').classList.add('hidden');
     $('#emoji-panel').classList.add('hidden');
     closeDialog();
@@ -1471,6 +1472,7 @@ function openStage(mode, user) {
 }
 function closeStage() {
   if (S.stage.mode === 'yt') destroyYtPlayer();
+  setFull(false);
   S.stage = { mode: null, user: null };
   $('#stage').classList.add('hidden');
   const v = $('#stage-video');
@@ -1478,11 +1480,22 @@ function closeStage() {
   for (const p of S.peers.values()) applyPeerAudio(p);
 }
 $('#stage-close').onclick = closeStage;
-$('#stage-full').onclick = () => {
-  const target = S.stage.mode === 'screen' ? $('#stage-video') : $('#stage-body');
-  if (document.fullscreenElement) document.exitFullscreen();
-  else target.requestFullscreen?.().catch(() => {});
-};
+// Tam ekran: sahne önce uygulama penceresini tamamen kaplar, izin varsa ekranı da kaplar
+// (eski masaüstü sürümleri tam ekran iznini reddettiği için pencereyi kaplama yedek olarak çalışır)
+function setFull(on) {
+  const st = $('#stage');
+  if (st.classList.contains('full') === on) return;
+  st.classList.toggle('full', on);
+  $('#stage-full').textContent = on ? '🗗' : '⛶';
+  $('#stage-full').title = on ? 'Tam ekrandan çık (Esc)' : 'Tam ekran';
+  if (on) document.documentElement.requestFullscreen?.().catch(() => {});
+  else if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+}
+$('#stage-full').onclick = () => setFull(!$('#stage').classList.contains('full'));
+$('#stage-body').ondblclick = () => setFull(!$('#stage').classList.contains('full'));
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) setFull(false);
+});
 
 /* ---------------- Ortak izleme (YouTube) ---------------- */
 let ytApi = null;
@@ -1619,6 +1632,30 @@ async function syncYt() {
   if (!s.paused && st !== YT.PlayerState.PLAYING && st !== YT.PlayerState.BUFFERING) ytPlayer.playVideo();
 }
 setInterval(() => S.stage.mode === 'yt' && syncYt(), 3000);
+
+// İlerleme çubuğu: sürükleyince herkesin videosu aynı yere gider
+let ytDragging = false;
+function updateYtSeek() {
+  const bar = $('#yt-seek');
+  const dur = ytReady ? ytPlayer?.getDuration?.() || 0 : 0;
+  bar.classList.toggle('hidden', !(S.stage.mode === 'yt' && S.yt?.current && dur > 0));
+  if (!dur || ytDragging || !S.yt?.current) return;
+  const cur = Math.min(dur, ytTarget());
+  const r = $('#yt-range');
+  r.max = Math.floor(dur);
+  r.value = Math.floor(cur);
+  $('#yt-cur').textContent = fmtTime(cur);
+  $('#yt-dur').textContent = fmtTime(dur);
+}
+setInterval(updateYtSeek, 500);
+$('#yt-range').addEventListener('input', (e) => {
+  ytDragging = true;
+  $('#yt-cur').textContent = fmtTime(Number(e.target.value));
+});
+$('#yt-range').addEventListener('change', (e) => {
+  S.socket?.emit('yt-control', { action: 'seek', t: Number(e.target.value) });
+  setTimeout(() => (ytDragging = false), 600);
+});
 
 $('#yt-form').addEventListener('submit', (e) => {
   e.preventDefault();

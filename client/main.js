@@ -47,7 +47,7 @@ function createWindow() {
 
   // Mikrofon ve ekran paylaşımı izinlerini otomatik ver
   // (ekranın hangisinin paylaşılacağını yine de kullanıcı seçer)
-  const ALLOWED = new Set(['media', 'display-capture']);
+  const ALLOWED = new Set(['media', 'display-capture', 'fullscreen']);
   session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(ALLOWED.has(permission)));
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => ALLOWED.has(permission));
 

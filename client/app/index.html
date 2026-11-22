@@ -102,6 +102,11 @@
           <div id="yt-wrap" class="hidden"><div id="yt-player"></div></div>
         </div>
         <div id="yt-panel" class="yt-panel hidden">
+          <div id="yt-seek" class="yt-seek hidden">
+            <span id="yt-cur">0:00</span>
+            <input type="range" id="yt-range" min="0" max="100" step="1" value="0" title="İleri / geri sar (herkeste)" />
+            <span id="yt-dur">0:00</span>
+          </div>
           <form id="yt-form" class="yt-form">
             <input id="yt-url" placeholder="YouTube linki yapıştır ve sıraya ekle…" autocomplete="off" />
             <button class="btn-primary small" type="submit">Ekle</button>
