@@ -1,6 +1,8 @@
 'use strict';
-// Muhabbet istemcisi: yazılı sohbet + özel mesaj + dosya paylaşımı (Socket.IO/HTTP)
-// ve sesli sohbet (WebRTC, eşler arası)
+// Muhabbet istemcisi
+// - Yazılı sohbet, özel mesaj, dosya, anket, karar çarkı, geçici odalar, durumlar (Socket.IO/HTTP)
+// - Sesli sohbet ve ekran paylaşımı (WebRTC, eşler arası)
+// - Ortak YouTube izleme, Pomodoro, son 30 saniye ses klibi, oda önizlemesi
 
 const $ = (s) => document.querySelector(s);
 const desktop = window.muhabbet || null;
@@ -8,6 +10,7 @@ const desktop = window.muhabbet || null;
 // Varsayılan sunucu adresi config.js'den gelir (GitHub'a yüklenmez)
 const DEFAULT_SERVER = window.MUHABBET_CONFIG?.defaultServer || 'http://localhost:3000';
 const MAX_FILE = 25 * 1024 * 1024;
+const CLIP_SECONDS = 30;
 
 const ICE = {
   iceServers: [
@@ -20,6 +23,7 @@ const AVATARS = ['🐱', '🐶', '🦊', '🐼', '🐨', '🐯', '🦁', '🐸',
 const AVATAR_BG = ['#ffd9e8', '#d4ebff', '#fff1b8', '#e6ddff', '#d3f5e3', '#ffe2c6'];
 const BUBBLES = ['c-blue', 'c-yellow', 'c-pink', 'c-purple', 'c-green', 'c-orange'];
 const NAME_COLORS = ['#3d8bfd', '#d49a00', '#e0457b', '#7c5cff', '#1f9e6b', '#e8772e'];
+const WHEEL_COLORS = ['#d4ebff', '#fff1b8', '#ffd9e8', '#e6ddff', '#d3f5e3', '#ffe2c6'];
 const EMOJIS = ['😀', '😂', '🤣', '😊', '😍', '😎', '🤔', '😴', '😭', '😡', '🥳', '🤯', '👍', '👎', '👏', '🙏',
   '🔥', '💯', '❤️', '💜', '🎮', '🕹️', '🏆', '⚔️', '🎯', '💀', '👀', '🚀', '⭐', '🎉', 'GG', '🍕'];
 
@@ -29,23 +33,32 @@ const S = {
   me: null,
   myName: '',
   users: [],
-  textChannels: [],
+  textChannels: [], // [{ id, name, temp }]
   voiceChannels: [],
   history: {},
   dms: JSON.parse(localStorage.getItem('dms') || '{}'), // karşı tarafın adı -> mesajlar
+  lastRead: JSON.parse(localStorage.getItem('lastRead') || '{}'), // kanal -> zaman
   unread: {}, // görünüm anahtarı -> sayı
-  view: { type: 'channel', id: null },
+  view: { type: 'channel', id: 'genel' },
   myVoice: null,
   muted: false,
   deafened: false,
   stream: null,
-  peers: new Map(), // userId -> { pc, audio, queue }
+  screenStream: null,
+  peers: new Map(), // userId -> eş bağlantısı
   speaking: new Set(),
   volumes: JSON.parse(localStorage.getItem('volumes') || '{}'), // isim -> 0..1
   micId: localStorage.getItem('micId') || '',
   speakerId: localStorage.getItem('speakerId') || '',
   noise: localStorage.getItem('noise') !== '0',
   settingsOpen: false,
+  stage: { mode: null, user: null }, // mode: 'screen' | 'yt'
+  yt: null,
+  ytOffset: 0,
+  pomo: null,
+  pomoOffset: 0,
+  pomoMuted: false,
+  spun: new Set(),
 };
 
 /* ---------------- Yardımcılar ---------------- */
@@ -72,6 +85,13 @@ function el(tag, cls, text) {
   if (cls) e.className = cls;
   if (text != null) e.textContent = text;
   return e;
+}
+function button(label, onClick, cls = 'chip', title) {
+  const b = el('button', cls, label);
+  b.type = 'button';
+  if (title) b.title = title;
+  b.onclick = onClick;
+  return b;
 }
 let toastTimer;
 function toast(msg, ms = 3500) {
@@ -112,8 +132,48 @@ function loadScript(src) {
 const userById = (id) => S.users.find((u) => u.id === id);
 const userByName = (name) => S.users.find((u) => u.name === name && u.id !== S.me);
 const fmtSize = (b) => (b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(0) + ' KB' : (b / 1048576).toFixed(1) + ' MB');
+const fmtTime = (sec) => {
+  sec = Math.max(0, Math.round(sec));
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+};
 const viewKey = (v) => (v.type === 'channel' ? 'c:' + v.id : 'd:' + v.name);
 const absUrl = (u) => S.serverUrl + u;
+const chName = (id) => S.textChannels.find((c) => c.id === id)?.name || S.voiceChannels.find((c) => c.id === id)?.name || id;
+const saveLastRead = () => localStorage.setItem('lastRead', JSON.stringify(S.lastRead));
+
+/* ---------------- Genel pencere ---------------- */
+let dialogClose = null;
+function openDialog(title, body, actions = []) {
+  $('#dialog-title').textContent = title;
+  $('#dialog-body').replaceChildren(...[].concat(body));
+  const box = $('#dialog-actions');
+  box.replaceChildren();
+  for (const a of actions) box.appendChild(button(a.label, a.onClick, a.primary ? 'btn-primary' : 'btn-ghost'));
+  $('#dialog').classList.remove('hidden');
+  return new Promise((resolve) => {
+    dialogClose = (v) => {
+      $('#dialog').classList.add('hidden');
+      dialogClose = null;
+      resolve(v);
+    };
+  });
+}
+const closeDialog = (v = null) => dialogClose?.(v);
+$('#dialog').addEventListener('mousedown', (e) => { if (e.target.id === 'dialog') closeDialog(); });
+
+function field(label, input) {
+  const l = el('label', null, label);
+  l.appendChild(input);
+  return l;
+}
+function inputEl(placeholder, value = '', max = 100) {
+  const i = el('input');
+  i.placeholder = placeholder;
+  i.value = value;
+  i.maxLength = max;
+  i.autocomplete = 'off';
+  return i;
+}
 
 /* ---------------- Giriş ---------------- */
 $('#name').value = localStorage.getItem('name') || '';
@@ -170,12 +230,16 @@ async function connect(name, url) {
       if (!first) toast('Bağlantı koptu, yeniden bağlanılıyor…');
     });
     socket.on('users', onUsers);
+    socket.on('channels', onChannels);
     socket.on('chat', onChat);
+    socket.on('msg-update', onMsgUpdate);
     socket.on('dm', onDm);
-    socket.on('voice-peers', (ids) => ids.forEach(callPeer));
+    socket.on('voice-peers', (ids) => ids.forEach((id) => makePeer(id, true)));
     socket.on('signal', onSignal);
     socket.on('peer-left', closePeer);
     socket.on('speaking', ({ id, speaking }) => setSpeaking(id, speaking));
+    socket.on('yt', onYt);
+    socket.on('pomo', onPomo);
     S.socket = socket;
     S.serverUrl = url;
   });
@@ -187,7 +251,7 @@ function onInit(d) {
   S.voiceChannels = d.voiceChannels;
   S.users = d.users;
   S.history = d.history;
-  if (S.view.type === 'channel' && !S.textChannels.includes(S.view.id)) S.view = { type: 'channel', id: S.textChannels[0] };
+  if (S.view.type === 'channel' && !S.textChannels.some((c) => c.id === S.view.id)) S.view = { type: 'channel', id: 'genel' };
   $('#login').classList.add('hidden');
   $('#main').classList.remove('hidden');
   const me = userById(S.me);
@@ -198,6 +262,13 @@ function onInit(d) {
   const av = avatarEl(me);
   $('#my-avatar').replaceWith(av);
   av.id = 'my-avatar';
+  // Başka kanallarda kaçırılan mesaj sayıları
+  for (const c of S.textChannels) {
+    if (S.view.type === 'channel' && c.id === S.view.id) continue;
+    const since = S.lastRead[c.id] || 0;
+    const n = (S.history[c.id] || []).filter((m) => m.ts > since && !m.mine).length;
+    if (n) S.unread['c:' + c.id] = n;
+  }
   renderAll();
   // Yeniden bağlanınca bulunduğun ses kanalına geri dön
   if (S.myVoice) {
@@ -217,20 +288,29 @@ function onUsers(list) {
     else if ([...before].some((id) => !after.has(id))) beep(380);
   }
   S.users = list;
+  // İzlediğim ekran paylaşımı bittiyse sahneyi kapat
+  if (S.stage.mode === 'screen' && S.stage.user !== S.me && !userById(S.stage.user)?.sharing) closeStage();
   renderVoiceChannels();
   renderMembers();
   renderDmList();
+  renderMyStatus();
   if (S.view.type === 'dm') renderHeader();
   for (const p of S.peers.values()) applyPeerAudio(p);
+}
+
+function onChannels(d) {
+  S.textChannels = d.textChannels;
+  S.voiceChannels = d.voiceChannels;
+  for (const id of Object.keys(S.history)) if (!S.textChannels.some((c) => c.id === id)) delete S.history[id];
+  if (S.myVoice && !S.voiceChannels.some((c) => c.id === S.myVoice)) leaveVoice();
+  if (S.view.type === 'channel' && !S.textChannels.some((c) => c.id === S.view.id)) openView({ type: 'channel', id: 'genel' });
+  else renderTextChannels();
+  renderVoiceChannels();
 }
 
 /* ---------------- Mesajlar ---------------- */
 function currentList() {
   return S.view.type === 'channel' ? S.history[S.view.id] || [] : S.dms[S.view.name] || [];
-}
-
-function addUnread(key) {
-  S.unread[key] = (S.unread[key] || 0) + 1;
 }
 
 function appendIfVisible(key, list, msg) {
@@ -240,10 +320,13 @@ function appendIfVisible(key, list, msg) {
   box.querySelector('.empty')?.remove();
   box.appendChild(messageEl(msg, list[list.length - 2]));
   if (atBottom || msg.mine) box.scrollTop = box.scrollHeight;
-  // Resim yüklenince aşağı kaydır
   box.lastElementChild.querySelectorAll('img').forEach((img) => img.addEventListener('load', () => {
     if (atBottom || msg.mine) box.scrollTop = box.scrollHeight;
   }));
+  if (S.view.type === 'channel') {
+    S.lastRead[S.view.id] = msg.ts;
+    saveLastRead();
+  }
   return true;
 }
 
@@ -251,12 +334,25 @@ function onChat(msg) {
   msg.mine = msg.userId === S.me;
   const list = (S.history[msg.channel] ||= []);
   list.push(msg);
+  if (list.length > 100) list.shift();
   const key = 'c:' + msg.channel;
   if (!appendIfVisible(key, list, msg)) {
-    addUnread(key);
+    S.unread[key] = (S.unread[key] || 0) + 1;
     renderTextChannels();
   }
   if (!msg.mine && !document.hasFocus()) beep(900, 0.08);
+}
+
+function onMsgUpdate(msg) {
+  const list = S.history[msg.channel];
+  const i = list ? list.findIndex((m) => m.id === msg.id) : -1;
+  if (i < 0) return;
+  msg.mine = list[i].mine;
+  list[i] = msg;
+  if (viewKey(S.view) === 'c:' + msg.channel) {
+    const old = $('#messages').querySelector(`[data-msg="${msg.id}"]`);
+    if (old) old.replaceWith(messageEl(msg, list[i - 1]));
+  }
 }
 
 function onDm(msg) {
@@ -268,7 +364,7 @@ function onDm(msg) {
   saveDms();
   const key = 'd:' + other;
   if (!appendIfVisible(key, list, list[list.length - 1])) {
-    addUnread(key);
+    S.unread[key] = (S.unread[key] || 0) + 1;
     if (!msg.mine) toast(`💌 ${msg.fromName}: ${msg.text || '📎 dosya'}`);
   }
   renderDmList();
@@ -279,10 +375,10 @@ function saveDms() {
   try { localStorage.setItem('dms', JSON.stringify(S.dms)); } catch {}
 }
 
-function sendMessage(text, file) {
+function sendMessage(text, file, channel) {
   if (!S.socket) return;
-  if (S.view.type === 'channel') {
-    S.socket.emit('chat', { channel: S.view.id, text, file });
+  if (channel || S.view.type === 'channel') {
+    S.socket.emit('chat', { channel: channel || S.view.id, text, file });
   } else {
     const u = userByName(S.view.name);
     if (!u) return toast(`${S.view.name} şu an çevrimdışı.`);
@@ -327,6 +423,15 @@ function fileEl(file) {
     };
     return img;
   }
+  if (file.audio) {
+    const wrap = el('div');
+    const a = el('audio', 'msg-audio');
+    a.controls = true;
+    a.preload = 'none';
+    a.src = absUrl(file.url);
+    wrap.append(a, el('div', 'clip-label', '🎬 ' + file.name));
+    return wrap;
+  }
   const a = el('a', 'file-card');
   a.href = absUrl(file.url) + '?name=' + encodeURIComponent(file.name);
   a.download = file.name;
@@ -336,13 +441,99 @@ function fileEl(file) {
   return a;
 }
 
+function pollEl(msg) {
+  const card = el('div', 'card');
+  card.appendChild(el('div', 'card-title', '📊 ' + msg.poll.question));
+  const total = msg.poll.options.reduce((s, o) => s + o.voters.length, 0);
+  msg.poll.options.forEach((o, i) => {
+    const row = el('div', 'poll-opt' + (o.voters.includes(S.myName) ? ' mine' : ''));
+    const fill = el('div', 'fill');
+    fill.style.width = (total ? (o.voters.length / total) * 100 : 0) + '%';
+    row.append(fill, el('span', null, o.text), el('span', 'cnt', String(o.voters.length)));
+    row.title = o.voters.join(', ') || 'Henüz oy yok';
+    row.onclick = () => S.socket.emit('vote', { channel: msg.channel, msgId: msg.id, option: i });
+    card.appendChild(row);
+  });
+  card.appendChild(el('div', 'poll-voters', total ? `${total} oy · değiştirmek için başka seçeneğe tıkla` : 'Oy vermek için tıkla'));
+  return card;
+}
+
+function wheelSvg(options) {
+  const ns = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(ns, 'svg');
+  svg.setAttribute('viewBox', '-100 -100 200 200');
+  const n = options.length;
+  const seg = (Math.PI * 2) / n;
+  options.forEach((opt, i) => {
+    const a0 = i * seg - Math.PI / 2;
+    const a1 = a0 + seg;
+    const path = document.createElementNS(ns, 'path');
+    const large = seg > Math.PI ? 1 : 0;
+    path.setAttribute('d', `M0 0 L${98 * Math.cos(a0)} ${98 * Math.sin(a0)} A98 98 0 ${large} 1 ${98 * Math.cos(a1)} ${98 * Math.sin(a1)} Z`);
+    path.setAttribute('fill', WHEEL_COLORS[i % WHEEL_COLORS.length]);
+    path.setAttribute('stroke', '#fff');
+    path.setAttribute('stroke-width', '2');
+    svg.appendChild(path);
+    const mid = a0 + seg / 2;
+    const t = document.createElementNS(ns, 'text');
+    t.setAttribute('x', 60 * Math.cos(mid));
+    t.setAttribute('y', 60 * Math.sin(mid));
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('dominant-baseline', 'middle');
+    t.setAttribute('font-size', n > 8 ? '9' : '11');
+    t.setAttribute('font-weight', '700');
+    t.setAttribute('fill', '#3b3355');
+    t.setAttribute('transform', `rotate(${(mid * 180) / Math.PI + 90} ${60 * Math.cos(mid)} ${60 * Math.sin(mid)})`);
+    t.textContent = opt.length > 12 ? opt.slice(0, 11) + '…' : opt;
+    svg.appendChild(t);
+  });
+  const c = document.createElementNS(ns, 'circle');
+  c.setAttribute('r', '10');
+  c.setAttribute('fill', '#7c5cff');
+  svg.appendChild(c);
+  return svg;
+}
+
+function wheelEl(msg) {
+  const w = msg.wheel;
+  const card = el('div', 'card');
+  card.appendChild(el('div', 'card-title', '🎡 ' + (w.title || 'Karar çarkı')));
+  const box = el('div', 'wheel-box');
+  const svg = wheelSvg(w.options);
+  box.append(el('div', 'wheel-pointer', '🔻'), svg);
+  card.appendChild(box);
+  const res = el('div', 'wheel-result');
+  card.appendChild(res);
+  const seg = 360 / w.options.length;
+  const final = 360 * 6 - (w.result + 0.5) * seg;
+  const showResult = () => {
+    res.textContent = '🎉 ' + w.options[w.result];
+    res.classList.add('show');
+  };
+  // Yeni çevrilen çark dönerek açılır, eskiler sonucu direkt gösterir
+  if (!S.spun.has(msg.id) && Date.now() - msg.ts < 8000) {
+    S.spun.add(msg.id);
+    svg.style.transform = 'rotate(0deg)';
+    requestAnimationFrame(() => requestAnimationFrame(() => (svg.style.transform = `rotate(${final}deg)`)));
+    res.textContent = 'Dönüyor…';
+    setTimeout(() => { showResult(); beep(880, 0.15); }, 4100);
+  } else {
+    S.spun.add(msg.id);
+    svg.style.transition = 'none';
+    svg.style.transform = `rotate(${final}deg)`;
+    showResult();
+  }
+  return card;
+}
+
 const isOnlyEmoji = (t) => t.length <= 8 && /^(\p{Extended_Pictographic}|‍|️|\s)+$/u.test(t);
 
 function messageEl(msg, prev) {
   const sender = msg.mine ? '__me' : msg.name;
   const prevSender = prev ? (prev.mine ? '__me' : prev.name) : null;
-  const cont = prev && prevSender === sender && msg.ts - prev.ts < 5 * 60 * 1000;
+  const cont = prev && prevSender === sender && msg.ts - prev.ts < 5 * 60 * 1000 && !msg.poll && !msg.wheel;
   const row = el('div', 'msg' + (cont ? ' cont' : '') + (msg.mine ? ' mine' : ''));
+  if (msg.id) row.dataset.msg = msg.id;
   row.appendChild(avatarEl({ id: msg.userId, name: msg.name }, 36));
   const body = el('div', 'msg-body');
   if (!cont) {
@@ -358,20 +549,54 @@ function messageEl(msg, prev) {
     body.appendChild(b);
   }
   if (msg.file) body.appendChild(fileEl(msg.file));
+  if (msg.poll) body.appendChild(pollEl(msg));
+  if (msg.wheel) body.appendChild(wheelEl(msg));
   row.appendChild(body);
   return row;
+}
+
+// "Neler kaçırdım?" özeti
+function missedEl(missed) {
+  const box = el('div', 'missed');
+  const counts = {};
+  let images = 0, files = 0, polls = 0, wheels = 0;
+  for (const m of missed) {
+    counts[m.name] = (counts[m.name] || 0) + 1;
+    if (m.file?.image) images++;
+    else if (m.file) files++;
+    if (m.poll) polls++;
+    if (m.wheel) wheels++;
+  }
+  const top = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([n, c]) => `${n} (${c})`).join(', ');
+  const parts = [`👋 Sen yokken <b>${missed.length}</b> mesaj yazıldı`];
+  const extra = [];
+  if (images) extra.push(`📷 ${images} fotoğraf`);
+  if (files) extra.push(`📎 ${files} dosya`);
+  if (polls) extra.push(`📊 ${polls} anket`);
+  if (wheels) extra.push(`🎡 ${wheels} çark`);
+  const lastPoll = [...missed].reverse().find((m) => m.poll);
+  box.append(el('div', null, ''), el('div'), el('div'));
+  box.children[0].innerHTML = parts[0];
+  box.children[1].textContent = '✍️ En çok yazanlar: ' + top + (extra.length ? ' · ' + extra.join(' · ') : '');
+  if (lastPoll) {
+    const best = [...lastPoll.poll.options].sort((a, b) => b.voters.length - a.voters.length)[0];
+    box.children[2].textContent = `🗳️ Son anket "${lastPoll.poll.question}": şu an önde → ${best.text} (${best.voters.length} oy)`;
+  }
+  return box;
 }
 
 function renderHeader() {
   const icon = $('#chat-icon');
   const input = $('#chat-input');
+  $('#header-tools').classList.toggle('hidden', S.view.type !== 'channel');
   if (S.view.type === 'channel') {
+    const ch = S.textChannels.find((c) => c.id === S.view.id);
     icon.className = 'chat-icon';
     icon.style.background = '';
-    icon.textContent = '#';
-    $('#chat-title').textContent = S.view.id;
-    $('#chat-sub').textContent = 'Herkese açık kanal';
-    input.placeholder = `#${S.view.id} kanalına mesaj yaz…`;
+    icon.textContent = ch?.temp ? '⏳' : '#';
+    $('#chat-title').textContent = ch?.name || S.view.id;
+    $('#chat-sub').textContent = ch?.temp ? 'Geçici oda · son kişi çıkınca silinir' : 'Herkese açık kanal';
+    input.placeholder = `#${ch?.name || S.view.id} kanalına mesaj yaz…`;
     input.disabled = false;
   } else {
     const online = !!userByName(S.view.name);
@@ -394,14 +619,33 @@ function renderMessages() {
     e.appendChild(el('span', 'big', S.view.type === 'channel' ? '💬' : '💌'));
     e.appendChild(document.createTextNode(
       S.view.type === 'channel'
-        ? `#${S.view.id} kanalının başlangıcı. İlk mesajı sen yaz!`
+        ? `#${chName(S.view.id)} kanalının başlangıcı. İlk mesajı sen yaz!`
         : `${S.view.name} ile özel sohbetin başlangıcı. Bu mesajları sadece ikiniz görebilir.`,
     ));
     box.appendChild(e);
   }
-  list.forEach((m, i) => box.appendChild(messageEl(m, list[i - 1])));
-  box.scrollTop = box.scrollHeight;
-  box.querySelectorAll('img').forEach((img) => img.addEventListener('load', () => (box.scrollTop = box.scrollHeight), { once: true }));
+  // Kanalda kaçırılan mesajlar: özet + "yeni mesajlar" çizgisi
+  let divider = null;
+  const since = S.view.type === 'channel' ? S.lastRead[S.view.id] || 0 : Infinity;
+  const missed = list.filter((m) => m.ts > since && !m.mine);
+  list.forEach((m, i) => {
+    if (!divider && missed.length && m === missed[0]) {
+      if (missed.length >= 5) box.appendChild(missedEl(missed));
+      divider = el('div', 'new-divider', 'YENİ MESAJLAR');
+      box.appendChild(divider);
+    }
+    box.appendChild(messageEl(m, list[i - 1]));
+  });
+  const scroll = () => {
+    if (divider && since) box.scrollTop = divider.offsetTop - 80;
+    else box.scrollTop = box.scrollHeight;
+  };
+  scroll();
+  box.querySelectorAll('img').forEach((img) => img.addEventListener('load', scroll, { once: true }));
+  if (S.view.type === 'channel' && list.length) {
+    S.lastRead[S.view.id] = list[list.length - 1].ts;
+    saveLastRead();
+  }
   renderHeader();
 }
 
@@ -415,24 +659,28 @@ function openView(view) {
 }
 
 /* ---------------- Dosya gönderme ---------------- */
+async function uploadBlob(blob, name) {
+  const r = await fetch(S.serverUrl + '/upload', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/octet-stream',
+      'X-Filename': encodeURIComponent(name),
+      'X-Socket-Id': S.socket.id,
+    },
+    body: blob,
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || 'Yükleme hatası');
+  return j;
+}
+
 async function uploadFiles(files) {
   for (const f of files) {
     if (f.size > MAX_FILE) { toast(`${f.name} çok büyük (en fazla 25 MB).`); continue; }
     if (S.view.type === 'dm' && !userByName(S.view.name)) { toast(`${S.view.name} şu an çevrimdışı.`); return; }
-    toast(`📤 Yükleniyor: ${f.name || 'resim'}…`, 60000);
+    toast(`📤 Yükleniyor: ${f.name || 'resim'}…`, 120000);
     try {
-      const r = await fetch(S.serverUrl + '/upload', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/octet-stream',
-          'X-Filename': encodeURIComponent(f.name || 'resim.png'),
-          'X-Socket-Id': S.socket.id,
-        },
-        body: f,
-      });
-      const j = await r.json().catch(() => ({}));
-      if (!r.ok) throw new Error(j.error || 'Yükleme hatası');
-      sendMessage('', j);
+      sendMessage('', await uploadBlob(f, f.name || 'resim.png'));
       $('#toast').classList.add('hidden');
     } catch (err) {
       toast('Gönderilemedi: ' + err.message);
@@ -476,23 +724,142 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     $('#lightbox').classList.add('hidden');
     $('#emoji-panel').classList.add('hidden');
+    closeDialog();
   }
 });
 
 /* ---------------- Emoji ---------------- */
 for (const em of EMOJIS) {
-  const b = el('button', null, em);
-  b.type = 'button';
-  b.onclick = () => {
+  const b = button(em, () => {
     const input = $('#chat-input');
     const pos = input.selectionStart ?? input.value.length;
     input.value = input.value.slice(0, pos) + em + input.value.slice(pos);
     input.focus();
     input.selectionStart = input.selectionEnd = pos + em.length;
-  };
+  }, '');
   $('#emoji-panel').appendChild(b);
 }
 $('#emoji-btn').onclick = () => $('#emoji-panel').classList.toggle('hidden');
+
+/* ---------------- Anket ve karar çarkı ---------------- */
+$('#poll-btn').onclick = () => {
+  const q = inputEl('Soru (örn. Bu akşam ne oynayalım?)', '', 200);
+  const opts = el('textarea');
+  opts.placeholder = 'Her satıra bir seçenek yaz\nValorant\nCS2\nMinecraft';
+  openDialog('📊 Anket başlat', [field('SORU', q), field('SEÇENEKLER', opts)], [
+    { label: 'Vazgeç', onClick: () => closeDialog() },
+    {
+      label: 'Başlat', primary: true, onClick: () => {
+        const options = opts.value.split('\n').map((s) => s.trim()).filter(Boolean);
+        if (!q.value.trim() || options.length < 2) return toast('Bir soru ve en az 2 seçenek yaz.');
+        S.socket.emit('poll', { channel: S.view.id, question: q.value, options });
+        closeDialog();
+      },
+    },
+  ]);
+  setTimeout(() => q.focus(), 50);
+};
+
+$('#wheel-btn').onclick = () => {
+  const t = inputEl('Başlık (örn. Ne oynayalım?)', '', 100);
+  const opts = el('textarea');
+  opts.placeholder = 'Her satıra bir seçenek yaz (en az 2, en fazla 12)';
+  const presets = el('div', 'chips');
+  const sets = {
+    '🎮 Oyunlar': 'Valorant\nCS2\nLoL\nMinecraft\nFortnite\nRocket League',
+    '🍕 Yemek': 'Pizza\nHamburger\nDöner\nLahmacun\nSushi',
+    '👥 Çevrimiçiler': () => S.users.map((u) => u.name).join('\n'),
+    '🪙 Yazı-Tura': 'Yazı\nTura',
+  };
+  for (const [label, val] of Object.entries(sets)) {
+    presets.appendChild(button(label, () => (opts.value = typeof val === 'function' ? val() : val)));
+  }
+  openDialog('🎡 Karar çarkı', [field('BAŞLIK', t), presets, field('SEÇENEKLER', opts)], [
+    { label: 'Vazgeç', onClick: () => closeDialog() },
+    {
+      label: 'Çevir!', primary: true, onClick: () => {
+        const options = opts.value.split('\n').map((s) => s.trim()).filter(Boolean);
+        if (options.length < 2) return toast('En az 2 seçenek yaz.');
+        S.socket.emit('wheel', { channel: S.view.id, title: t.value, options });
+        closeDialog();
+      },
+    },
+  ]);
+};
+
+/* ---------------- Geçici odalar ---------------- */
+$('#new-room-btn').onclick = () => {
+  const name = inputEl('Oda adı', '', 32);
+  const chips = el('div', 'chips');
+  for (const s of ['🎮 Bu akşamki maç', '🔫 Valorant 5\'li', '⛏️ Minecraft', '📚 Ders', '🎬 Film gecesi']) {
+    chips.appendChild(button(s, () => (name.value = s)));
+  }
+  const create = () => {
+    if (!name.value.trim()) return toast('Odaya bir ad ver.');
+    S.socket.emit('create-room', { name: name.value }, (r) => {
+      if (r?.error) return toast(r.error);
+      closeDialog();
+      setTimeout(() => {
+        joinVoice(r.id);
+        openView({ type: 'channel', id: r.id });
+      }, 100);
+    });
+  };
+  name.addEventListener('keydown', (e) => e.key === 'Enter' && create());
+  openDialog('⏳ Geçici oda aç', [
+    field('ODA ADI', name), chips,
+    el('p', 'hint', 'Sesli ve yazılı bir oda açılır. İçindeki son kişi çıkınca oda ve mesajları otomatik silinir.'),
+  ], [{ label: 'Vazgeç', onClick: () => closeDialog() }, { label: 'Aç ve gir', primary: true, onClick: create }]);
+  setTimeout(() => name.focus(), 50);
+};
+
+/* ---------------- Süreli durum ---------------- */
+function renderMyStatus() {
+  const me = userById(S.me);
+  const box = $('#my-status');
+  if (me?.status) {
+    const left = Math.max(0, me.status.until - Date.now());
+    box.textContent = `${me.status.emoji} ${me.status.text} · ${Math.ceil(left / 60000)} dk`;
+  } else box.textContent = 'Çevrimiçi · durum ekle';
+}
+setInterval(renderMyStatus, 30000);
+
+$('#my-info').onclick = () => {
+  const me = userById(S.me);
+  const emoji = inputEl('😀', me?.status?.emoji || '🎮', 8);
+  emoji.style.width = '70px';
+  emoji.style.flex = '0 0 70px';
+  const text = inputEl('Ne yapıyorsun?', me?.status?.text || '', 60);
+  const row = el('div', 'row');
+  row.append(emoji, text);
+  const presets = el('div', 'chips');
+  for (const [e, t] of [['🎮', 'Oyun +1 lazım'], ['🔥', 'Rank kasıyorum'], ['📚', 'Ders çalışıyorum'], ['🍕', 'Yemekteyim'], ['😴', 'AFK'], ['🎧', 'Müzik dinliyorum']]) {
+    presets.appendChild(button(`${e} ${t}`, () => { emoji.value = e; text.value = t; }));
+  }
+  let minutes = 120;
+  const durs = el('div', 'chips');
+  for (const [label, m] of [['30 dk', 30], ['1 saat', 60], ['2 saat', 120], ['4 saat', 240], ['Bugün', 720]]) {
+    const b = button(label, () => {
+      minutes = m;
+      durs.querySelectorAll('.chip').forEach((c) => c.classList.toggle('on', c === b));
+    });
+    if (m === minutes) b.classList.add('on');
+    durs.appendChild(b);
+  }
+  openDialog('💬 Durumunu ayarla', [
+    row, presets, field('NE KADAR SÜRSÜN?', durs),
+    el('p', 'hint', 'Durumun herkesin listesinde görünür; süresi dolunca kendiliğinden kalkar. Arkadaşların durumuna tıklayıp yanına katılabilir.'),
+  ], [
+    { label: 'Temizle', onClick: () => { S.socket.emit('status', null); closeDialog(); } },
+    {
+      label: 'Kaydet', primary: true, onClick: () => {
+        if (!text.value.trim()) return toast('Bir durum yaz.');
+        S.socket.emit('status', { emoji: emoji.value, text: text.value, minutes });
+        closeDialog();
+      },
+    },
+  ]);
+};
 
 /* ---------------- Arayüz ---------------- */
 function renderAll() {
@@ -501,6 +868,7 @@ function renderAll() {
   renderVoiceChannels();
   renderMembers();
   renderMessages();
+  renderMyStatus();
   updateButtons();
 }
 
@@ -513,12 +881,12 @@ function renderTextChannels() {
   const box = $('#text-channels');
   box.replaceChildren();
   for (const ch of S.textChannels) {
-    const active = S.view.type === 'channel' && S.view.id === ch;
+    const active = S.view.type === 'channel' && S.view.id === ch.id;
     const d = el('div', 'channel' + (active ? ' active' : ''));
-    d.append(el('span', 'ico', '#'), el('span', null, ch));
-    const b = badge('c:' + ch);
+    d.append(el('span', 'ico', ch.temp ? '⏳' : '#'), el('span', null, ch.name));
+    const b = badge('c:' + ch.id);
     if (b) d.appendChild(b);
-    d.onclick = () => openView({ type: 'channel', id: ch });
+    d.onclick = () => openView({ type: 'channel', id: ch.id });
     box.appendChild(d);
   }
 }
@@ -526,11 +894,7 @@ function renderTextChannels() {
 function renderDmList() {
   const box = $('#dm-list');
   box.replaceChildren();
-  const names = Object.keys(S.dms).sort((a, b) => {
-    const la = S.dms[a].at(-1)?.ts || 0;
-    const lb = S.dms[b].at(-1)?.ts || 0;
-    return lb - la;
-  });
+  const names = Object.keys(S.dms).sort((a, b) => (S.dms[b].at(-1)?.ts || 0) - (S.dms[a].at(-1)?.ts || 0));
   if (S.view.type === 'dm' && !names.includes(S.view.name)) names.unshift(S.view.name);
   if (!names.length) {
     box.appendChild(el('div', 'empty-small', 'Sağdan birine tıkla 👉'));
@@ -542,8 +906,9 @@ function renderDmList() {
     const u = userByName(name);
     d.append(avatarEl({ id: u?.id, name }), el('span', null, name));
     const b = badge('d:' + name);
-    d.appendChild(b || el('span', 'online-dot' + (u ? ' on' : '')));
-    if (!b) d.lastChild.style.marginLeft = 'auto';
+    const dot = b || el('span', 'online-dot' + (u ? ' on' : ''));
+    if (!b) dot.style.marginLeft = 'auto';
+    d.appendChild(dot);
     d.onclick = () => openView({ type: 'dm', name });
     box.appendChild(d);
   }
@@ -553,22 +918,31 @@ function renderVoiceChannels() {
   const box = $('#voice-channels');
   box.replaceChildren();
   for (const ch of S.voiceChannels) {
-    const d = el('div', 'channel' + (ch === S.myVoice ? ' active' : ''));
-    d.append(el('span', 'ico', '🔊'), el('span', null, ch));
+    const d = el('div', 'channel' + (ch.id === S.myVoice ? ' active' : ''));
+    d.append(el('span', 'ico', ch.temp ? '⏳' : '🔊'), el('span', null, ch.name));
+    if (ch.temp) d.appendChild(el('span', 'temp-tag', 'geçici'));
     d.title = 'Katılmak için tıkla';
-    d.onclick = () => joinVoice(ch);
+    d.onclick = () => joinVoice(ch.id);
+    d.onmouseenter = () => showPeek(ch, d);
+    d.onmouseleave = hidePeek;
     box.appendChild(d);
 
     const wrap = el('div', 'voice-users');
-    for (const u of S.users.filter((x) => x.voice === ch)) {
+    for (const u of S.users.filter((x) => x.voice === ch.id)) {
       const row = el('div', 'voice-user');
       row.append(avatarEl(u), el('span', null, u.name));
       const flags = (u.muted ? '🔇' : '') + (u.deafened ? '🙉' : '');
+      if (u.sharing) {
+        const s = button('🖥️', (e) => { e.stopPropagation(); watchScreen(u.id); }, 'icon-btn', `${u.name} ekranını izle`);
+        s.style.marginLeft = 'auto';
+        s.style.width = s.style.height = '26px';
+        row.appendChild(s);
+      }
       if (flags) row.appendChild(el('span', 'flags', flags));
       // Aynı kanaldaki diğer kişiler için ses seviyesi kaydırıcısı
-      if (u.id !== S.me && ch === S.myVoice) {
+      if (u.id !== S.me && ch.id === S.myVoice) {
         const vol = el('div', 'vol');
-        const r = document.createElement('input');
+        const r = el('input');
         r.type = 'range';
         r.min = 0;
         r.max = 100;
@@ -588,7 +962,10 @@ function renderVoiceChannels() {
     box.appendChild(wrap);
   }
   $('#voice-status').classList.toggle('hidden', !S.myVoice);
-  $('#vs-channel').textContent = S.myVoice || '';
+  $('#vs-channel').textContent = S.myVoice ? chName(S.myVoice) : '';
+  $('#share-btn').classList.toggle('on', !!S.screenStream);
+  $('#yt-btn').classList.toggle('on', !!S.yt?.current);
+  $('#pomo-btn').classList.toggle('on', !!S.pomo);
 }
 
 function renderMembers() {
@@ -599,8 +976,20 @@ function renderMembers() {
     const isMe = u.id === S.me;
     const row = el('div', 'member' + (isMe ? ' me' : ''));
     const info = el('div');
+    info.style.minWidth = '0';
     info.appendChild(el('div', 'm-name', u.name + (isMe ? ' (sen)' : '')));
-    info.appendChild(el('div', 'sub2', u.voice ? '🔊 ' + u.voice : isMe ? 'Çevrimiçi' : '💌 Mesaj gönder'));
+    info.appendChild(el('div', 'sub2', u.voice ? '🔊 ' + chName(u.voice) + (u.sharing ? ' · 🖥️ yayında' : '') : isMe ? 'Çevrimiçi' : '💌 Mesaj gönder'));
+    if (u.status) {
+      const pill = el('div', 'status-pill', `${u.status.emoji} ${u.status.text}`);
+      pill.title = isMe ? 'Senin durumun' : u.voice ? 'Tıkla: odasına katıl' : 'Tıkla: mesaj gönder';
+      pill.onclick = (e) => {
+        e.stopPropagation();
+        if (isMe) return $('#my-info').click();
+        if (u.voice) joinVoice(u.voice);
+        else openView({ type: 'dm', name: u.name });
+      };
+      info.appendChild(pill);
+    }
     row.append(avatarEl(u), info);
     if (!isMe) row.onclick = () => openView({ type: 'dm', name: u.name });
     box.appendChild(row);
@@ -610,6 +999,53 @@ function renderMembers() {
 function setSpeaking(id, on) {
   on ? S.speaking.add(id) : S.speaking.delete(id);
   document.querySelectorAll(`[data-speak="${CSS.escape(id)}"]`).forEach((a) => a.classList.toggle('speaking', on));
+}
+
+/* ---------------- Oda önizlemesi ---------------- */
+let peekTimer;
+function showPeek(ch, anchor) {
+  clearTimeout(peekTimer);
+  peekTimer = setTimeout(() => {
+    const members = S.users.filter((u) => u.voice === ch.id);
+    const box = $('#peek');
+    box.replaceChildren();
+    box.appendChild(el('h4', null, (ch.temp ? '⏳ ' : '🔊 ') + ch.name));
+    if (!members.length) {
+      box.appendChild(el('div', 'p-sub', 'Şu an kimse yok. Tıkla ve ilk sen gir!'));
+    } else {
+      const talking = members.filter((u) => S.speaking.has(u.id)).length;
+      const mood = talking === 0 ? '🤫 Sessiz' : talking === 1 ? '🙂 Sakin' : talking <= 3 ? '😄 Hareketli' : '🎉 Çok gürültülü';
+      box.appendChild(el('div', 'p-sub', `${members.length} kişi · ${mood}`));
+      const noise = el('div', 'noise');
+      const bar = el('div');
+      bar.style.width = Math.min(100, (talking / members.length) * 100) + '%';
+      noise.appendChild(bar);
+      box.appendChild(noise);
+      for (const u of members) {
+        const r = el('div', 'p-user');
+        r.append(avatarEl(u), el('span', null, u.name + (u.sharing ? ' 🖥️' : '') + (u.muted ? ' 🔇' : '')));
+        box.appendChild(r);
+      }
+      if (members.some((u) => u.sharing)) {
+        S.socket.emit('peek', ch.id, (frames) => {
+          for (const f of frames || []) {
+            box.appendChild(el('div', 'p-sub', `🖥️ ${f.name} ekran paylaşıyor:`));
+            const img = el('img');
+            img.src = f.frame;
+            box.appendChild(img);
+          }
+        });
+      }
+    }
+    const r = anchor.getBoundingClientRect();
+    box.style.left = r.right + 12 + 'px';
+    box.style.top = Math.min(r.top, window.innerHeight - 320) + 'px';
+    box.classList.remove('hidden');
+  }, 300);
+}
+function hidePeek() {
+  clearTimeout(peekTimer);
+  $('#peek').classList.add('hidden');
 }
 
 /* ---------------- Mikrofon ---------------- */
@@ -688,7 +1124,7 @@ async function restartMic() {
   }
   const track = S.stream.getAudioTracks()[0];
   for (const p of S.peers.values()) {
-    for (const s of p.pc.getSenders()) if (s.track && s.track.kind === 'audio') await s.replaceTrack(track);
+    if (p.micSender) await p.micSender.replaceTrack(track);
   }
   old.getTracks().forEach((t) => t.stop());
   applyMute();
@@ -703,6 +1139,7 @@ function startAnalyser() {
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 512;
   srcNode.connect(analyser);
+  if (clip.mix) srcNode.connect(clip.mix);
   const buf = new Float32Array(analyser.fftSize);
   let speaking = false;
   let lastLoud = 0;
@@ -742,60 +1179,105 @@ async function joinVoice(ch) {
     toast('Mikrofona erişilemedi: ' + micErrorText(err), 6000);
     return;
   }
-  if (S.myVoice) dropAllPeers();
+  if (S.myVoice) leaveVoice(true);
   S.myVoice = ch;
   S.socket.emit('join-voice', ch);
+  startClip();
   applyMute();
   beep(660);
+  renderVoiceChannels();
 }
 
-function leaveVoice() {
+function leaveVoice(switching) {
   if (!S.myVoice) return;
+  stopShare();
+  closeStage();
   dropAllPeers();
   S.socket?.emit('leave-voice');
   S.myVoice = null;
-  if (!S.settingsOpen) releaseMic();
-  beep(330);
+  S.yt = null;
+  onPomo({ channel: null, state: null });
+  stopClip();
+  if (!switching) {
+    if (!S.settingsOpen) releaseMic();
+    beep(330);
+  }
   renderVoiceChannels();
 }
-$('#leave-btn').onclick = leaveVoice;
+$('#leave-btn').onclick = () => leaveVoice();
 
-function makePeer(id) {
+// "Kibar" eş çakışmada geri adım atar (perfect negotiation): bağlantı kurulduktan sonra
+// ekran paylaşımı eklenip çıkarılabilsin diye her iki taraf da yeniden teklif gönderebilir
+function makePeer(id, initiator) {
+  closePeer(id);
   const pc = new RTCPeerConnection(ICE);
-  const p = { id, pc, audio: null, queue: Promise.resolve() };
-  S.stream.getAudioTracks().forEach((t) => pc.addTrack(t, S.stream));
+  const p = {
+    id, pc, audio: null, screenAudio: null, micStream: null, screen: null, micSender: null, screenSenders: [],
+    polite: S.me > id, makingOffer: false, ignoreOffer: false, tracksAdded: false, queue: Promise.resolve(), clipSrc: null,
+  };
+  pc.onnegotiationneeded = async () => {
+    try {
+      p.makingOffer = true;
+      await pc.setLocalDescription();
+      S.socket.emit('signal', { to: id, data: { description: pc.localDescription } });
+    } catch (err) {
+      console.warn('negotiation', err);
+    } finally {
+      p.makingOffer = false;
+    }
+  };
   pc.onicecandidate = (e) => {
     if (e.candidate) S.socket.emit('signal', { to: id, data: { candidate: e.candidate } });
   };
-  pc.ontrack = (e) => {
-    if (!p.audio) {
-      p.audio = new Audio();
-      p.audio.autoplay = true;
-      document.body.appendChild(p.audio);
-    }
-    p.audio.srcObject = e.streams[0];
-    applyPeerAudio(p);
-    p.audio.play().catch(() => {});
-  };
+  pc.ontrack = (e) => onTrack(p, e);
   pc.onconnectionstatechange = () => {
     if (pc.connectionState === 'failed') {
       const u = userById(id);
-      toast(`${u ? u.name : 'Bir kullanıcı'} ile ses bağlantısı kurulamadı (ağ/NAT engeli).`);
+      toast(`${u ? u.name : 'Bir kullanıcı'} ile bağlantı kurulamadı (ağ/NAT engeli).`);
     }
   };
   S.peers.set(id, p);
+  if (initiator) addLocalTracks(p);
   return p;
 }
 
-async function callPeer(id) {
-  if (!S.stream) return;
-  const p = makePeer(id);
-  try {
-    await p.pc.setLocalDescription(await p.pc.createOffer());
-    S.socket.emit('signal', { to: id, data: { description: p.pc.localDescription } });
-  } catch (err) {
-    console.warn('offer', err);
+function addLocalTracks(p) {
+  if (p.tracksAdded || !S.stream) return;
+  p.tracksAdded = true;
+  const t = S.stream.getAudioTracks()[0];
+  if (t) p.micSender = p.pc.addTrack(t, S.stream);
+  if (S.screenStream) p.screenSenders = S.screenStream.getTracks().map((tr) => p.pc.addTrack(tr, S.screenStream));
+}
+
+function onTrack(p, e) {
+  const stream = e.streams[0];
+  if (!stream) return;
+  const isScreen = e.track.kind === 'video' || (p.micStream && p.micStream.id !== stream.id) || (p.screen && p.screen.id === stream.id);
+  if (isScreen) {
+    p.screen = stream;
+    if (!p.screenAudio) {
+      p.screenAudio = new Audio();
+      p.screenAudio.autoplay = true;
+      document.body.appendChild(p.screenAudio);
+    }
+    p.screenAudio.srcObject = stream;
+    stream.onremovetrack = () => {
+      if (!stream.getVideoTracks().length) p.screen = null;
+    };
+    applyPeerAudio(p);
+    if (S.stage.mode === 'screen' && S.stage.user === p.id) watchScreen(p.id);
+    return;
   }
+  p.micStream = stream;
+  if (!p.audio) {
+    p.audio = new Audio();
+    p.audio.autoplay = true;
+    document.body.appendChild(p.audio);
+  }
+  p.audio.srcObject = stream;
+  applyPeerAudio(p);
+  p.audio.play().catch(() => {});
+  clipAddPeer(p);
 }
 
 function onSignal({ from, data }) {
@@ -803,19 +1285,29 @@ function onSignal({ from, data }) {
   let p = S.peers.get(from);
   if (!p) {
     if (data.description?.type !== 'offer') return;
-    p = makePeer(from);
+    p = makePeer(from, false);
   }
   // Sinyalleri sırayla işle (ICE adayları açıklamadan önce işlenmesin)
   p.queue = p.queue
     .then(async () => {
+      const pc = p.pc;
       if (data.description) {
-        await p.pc.setRemoteDescription(data.description);
-        if (data.description.type === 'offer') {
-          await p.pc.setLocalDescription(await p.pc.createAnswer());
-          S.socket.emit('signal', { to: from, data: { description: p.pc.localDescription } });
+        const d = data.description;
+        const collision = d.type === 'offer' && (p.makingOffer || pc.signalingState !== 'stable');
+        p.ignoreOffer = !p.polite && collision;
+        if (p.ignoreOffer) return;
+        await pc.setRemoteDescription(d);
+        if (d.type === 'offer') {
+          addLocalTracks(p); // gelen teklifin ses kanalını yeniden kullanır, fazladan pazarlık gerekmez
+          await pc.setLocalDescription();
+          S.socket.emit('signal', { to: from, data: { description: pc.localDescription } });
         }
       } else if (data.candidate) {
-        await p.pc.addIceCandidate(data.candidate);
+        try {
+          await pc.addIceCandidate(data.candidate);
+        } catch (err) {
+          if (!p.ignoreOffer) throw err;
+        }
       }
     })
     .catch((err) => console.warn('signal', err));
@@ -826,6 +1318,8 @@ function closePeer(id) {
   if (!p) return;
   p.pc.close();
   p.audio?.remove();
+  p.screenAudio?.remove();
+  p.clipSrc?.disconnect();
   S.peers.delete(id);
   setSpeaking(id, false);
 }
@@ -834,12 +1328,469 @@ function dropAllPeers() {
 }
 
 function applyPeerAudio(p) {
-  if (!p.audio) return;
   const u = userById(p.id);
-  p.audio.volume = u ? S.volumes[u.name] ?? 1 : 1;
-  p.audio.muted = S.deafened;
-  if (S.speakerId && p.audio.setSinkId && p.audio.sinkId !== S.speakerId) p.audio.setSinkId(S.speakerId).catch(() => {});
+  const vol = u ? S.volumes[u.name] ?? 1 : 1;
+  for (const a of [p.audio, p.screenAudio]) {
+    if (!a) continue;
+    a.volume = vol;
+    if (S.speakerId && a.setSinkId && a.sinkId !== S.speakerId) a.setSinkId(S.speakerId).catch(() => {});
+  }
+  if (p.audio) p.audio.muted = S.deafened;
+  // Ekran sesi sadece o ekranı izlerken duyulur
+  if (p.screenAudio) p.screenAudio.muted = S.deafened || !(S.stage.mode === 'screen' && S.stage.user === p.id);
 }
+
+/* ---------------- Ekran paylaşımı ---------------- */
+desktop?.onPickSource?.((list) => pickSource(list));
+
+function pickSource(list) {
+  let chosen = list.find((s) => s.id.startsWith('screen')) || list[0];
+  const grid = el('div', 'src-grid');
+  for (const s of list) {
+    const card = el('div', 'src' + (s === chosen ? ' on' : ''));
+    const img = el('img');
+    img.src = s.thumb;
+    card.append(img, el('div', null, s.name));
+    card.onclick = () => {
+      chosen = s;
+      grid.querySelectorAll('.src').forEach((c) => c.classList.toggle('on', c === card));
+    };
+    card.ondblclick = () => closeDialog({ id: s.id, audio: audio.checked });
+    grid.appendChild(card);
+  }
+  const audio = el('input');
+  audio.type = 'checkbox';
+  const lab = el('label', 'check');
+  lab.append(audio, document.createTextNode(' Bilgisayar sesini de paylaş (oyun/müzik)'));
+  return openDialog('🖥️ Neyi paylaşmak istersin?', [
+    grid, lab,
+    el('p', 'hint', 'İpucu: Ses paylaşırken kulaklık kullan, yoksa arkadaşların kendi seslerini geri duyabilir.'),
+  ], [
+    { label: 'Vazgeç', onClick: () => closeDialog(null) },
+    { label: 'Paylaş', primary: true, onClick: () => closeDialog(chosen ? { id: chosen.id, audio: audio.checked } : null) },
+  ]);
+}
+
+let peekFrameTimer;
+async function startShare() {
+  if (!S.myVoice) return toast('Önce bir ses odasına gir.');
+  if (desktop && !desktop.onPickSource) {
+    return toast('Ekran paylaşımı için uygulamanın yeni sürümü gerekiyor (yeni Muhabbet.exe).', 6000);
+  }
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true });
+  } catch (err) {
+    if (err.name !== 'NotAllowedError' && err.name !== 'AbortError') toast('Ekran paylaşılamadı: ' + err.message);
+    return;
+  }
+  if (!S.myVoice) return stream.getTracks().forEach((t) => t.stop());
+  S.screenStream = stream;
+  const v = stream.getVideoTracks()[0];
+  if (v) {
+    v.contentHint = 'motion';
+    v.onended = stopShare;
+  }
+  for (const p of S.peers.values()) {
+    if (p.tracksAdded) p.screenSenders = stream.getTracks().map((t) => p.pc.addTrack(t, stream));
+  }
+  S.socket.emit('sharing', true);
+  // Önizleme için birkaç saniyede bir küçük görüntü gönder
+  const vid = el('video');
+  vid.muted = true;
+  vid.srcObject = stream;
+  vid.play().catch(() => {});
+  const canvas = el('canvas');
+  canvas.width = 320;
+  canvas.height = 180;
+  const sendFrame = () => {
+    if (!vid.videoWidth) return;
+    canvas.getContext('2d').drawImage(vid, 0, 0, 320, 180);
+    S.socket?.emit('peek-frame', canvas.toDataURL('image/jpeg', 0.6));
+  };
+  setTimeout(sendFrame, 1000);
+  peekFrameTimer = setInterval(sendFrame, 4000);
+  watchScreen(S.me);
+  renderVoiceChannels();
+}
+
+function stopShare() {
+  if (!S.screenStream) return;
+  clearInterval(peekFrameTimer);
+  S.screenStream.getTracks().forEach((t) => t.stop());
+  S.screenStream = null;
+  for (const p of S.peers.values()) {
+    for (const s of p.screenSenders) {
+      try { p.pc.removeTrack(s); } catch {}
+    }
+    p.screenSenders = [];
+  }
+  S.socket?.emit('sharing', false);
+  if (S.stage.mode === 'screen' && S.stage.user === S.me) closeStage();
+  renderVoiceChannels();
+}
+$('#share-btn').onclick = () => (S.screenStream ? stopShare() : startShare());
+
+function watchScreen(userId) {
+  const isMe = userId === S.me;
+  const stream = isMe ? S.screenStream : S.peers.get(userId)?.screen;
+  const u = userById(userId);
+  if (!isMe && userById(userId)?.voice !== S.myVoice) return toast('İzlemek için önce o odaya gir.');
+  openStage('screen', userId);
+  $('#stage-title').textContent = isMe ? '🖥️ Ekranını paylaşıyorsun' : `🖥️ ${u?.name || ''} ekranı`;
+  const v = $('#stage-video');
+  v.classList.remove('hidden');
+  if (stream) {
+    v.srcObject = stream;
+    v.play().catch(() => {});
+  } else {
+    v.srcObject = null;
+    $('#stage-title').textContent += ' (bağlanıyor…)';
+  }
+  const actions = $('#stage-actions');
+  actions.replaceChildren();
+  if (isMe) actions.appendChild(button('⏹️ Durdur', stopShare, 'btn-ghost'));
+  for (const p of S.peers.values()) applyPeerAudio(p);
+}
+
+/* ---------------- Sahne ---------------- */
+function openStage(mode, user) {
+  if (S.stage.mode === 'yt' && mode !== 'yt') destroyYtPlayer();
+  S.stage = { mode, user };
+  $('#stage').classList.remove('hidden');
+  $('#stage-video').classList.toggle('hidden', mode !== 'screen');
+  $('#yt-wrap').classList.toggle('hidden', mode !== 'yt');
+  $('#yt-panel').classList.toggle('hidden', mode !== 'yt');
+}
+function closeStage() {
+  if (S.stage.mode === 'yt') destroyYtPlayer();
+  S.stage = { mode: null, user: null };
+  $('#stage').classList.add('hidden');
+  const v = $('#stage-video');
+  v.srcObject = null;
+  for (const p of S.peers.values()) applyPeerAudio(p);
+}
+$('#stage-close').onclick = closeStage;
+$('#stage-full').onclick = () => {
+  const target = S.stage.mode === 'screen' ? $('#stage-video') : $('#stage-body');
+  if (document.fullscreenElement) document.exitFullscreen();
+  else target.requestFullscreen?.().catch(() => {});
+};
+
+/* ---------------- Ortak izleme (YouTube) ---------------- */
+let ytApi = null;
+let ytPlayer = null;
+let ytReady = false;
+let ytApplying = 0;
+function loadYtApi() {
+  ytApi ||= new Promise((resolve, reject) => {
+    window.onYouTubeIframeAPIReady = resolve;
+    const s = el('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    s.onerror = () => { ytApi = null; reject(new Error('YouTube yüklenemedi')); };
+    document.head.appendChild(s);
+  });
+  return ytApi;
+}
+const ytServerNow = () => Date.now() + S.ytOffset;
+const ytTarget = () => (S.yt.paused ? S.yt.pos : (ytServerNow() - S.yt.startedAt) / 1000);
+
+function onYt({ channel, state }) {
+  if (channel !== S.myVoice) return;
+  const prev = S.yt?.current?.vid;
+  S.yt = state;
+  if (state) S.ytOffset = state.now - Date.now();
+  // Yeni video başladığında sahneyi kendiliğinden aç
+  if (state?.current && state.current.vid !== prev) {
+    if (S.stage.mode !== 'yt' && S.stage.mode !== 'screen') openYt();
+    toast(`📺 Şimdi oynuyor: ${state.current.title} (${state.current.by} ekledi)`);
+  }
+  if (S.stage.mode === 'yt') renderYt();
+  renderVoiceChannels();
+}
+
+function openYt() {
+  if (!S.myVoice) return toast('Birlikte izlemek için önce bir ses odasına gir.');
+  openStage('yt');
+  renderYt();
+}
+$('#yt-btn').onclick = () => (S.stage.mode === 'yt' ? closeStage() : openYt());
+
+function destroyYtPlayer() {
+  try { ytPlayer?.destroy(); } catch {}
+  ytPlayer = null;
+  ytReady = false;
+  $('#yt-wrap').replaceChildren(el('div'));
+  $('#yt-wrap').firstChild.id = 'yt-player';
+}
+
+function renderYt() {
+  const s = S.yt;
+  $('#stage-title').textContent = s?.current ? `📺 ${s.current.title}` : '📺 Birlikte izle — sıraya video ekle';
+  const actions = $('#stage-actions');
+  actions.replaceChildren();
+  if (s?.current) {
+    actions.append(
+      button('⏪', () => S.socket.emit('yt-control', { action: 'seek', t: Math.max(0, ytTarget() - 10) }), 'tool-btn', '10 sn geri'),
+      button(s.paused ? '▶️' : '⏸️', () => S.socket.emit('yt-control', { action: s.paused ? 'play' : 'pause' }), 'tool-btn', 'Oynat / duraklat'),
+      button('⏩', () => S.socket.emit('yt-control', { action: 'seek', t: ytTarget() + 10 }), 'tool-btn', '10 sn ileri'),
+      button('⏭️', () => S.socket.emit('yt-control', { action: 'skip', vid: s.current.vid }), 'tool-btn', 'Sıradakine geç'),
+      button('⏹️', () => S.socket.emit('yt-control', { action: 'stop' }), 'tool-btn', 'Hepsini durdur'),
+    );
+    const vol = el('input');
+    vol.type = 'range';
+    vol.min = 0;
+    vol.max = 100;
+    vol.value = localStorage.getItem('ytVol') || 60;
+    vol.style.width = '80px';
+    vol.title = 'Ses (sadece sende)';
+    vol.oninput = () => {
+      localStorage.setItem('ytVol', vol.value);
+      ytPlayer?.setVolume?.(Number(vol.value));
+    };
+    actions.appendChild(vol);
+  }
+  const q = $('#yt-queue');
+  q.replaceChildren();
+  if (s?.queue?.length) {
+    s.queue.forEach((it, i) => {
+      const row = el('div', 'yt-item');
+      row.append(el('span', null, `${i + 1}. ${it.title} — ${it.by}`), button('✖', () => S.socket.emit('yt-control', { action: 'remove', index: i }), '', 'Sıradan çıkar'));
+      q.appendChild(row);
+    });
+  } else q.appendChild(el('div', null, s?.current ? 'Sırada başka video yok.' : 'Link yapıştır; herkes aynı anda izler. Müzik için de kullanabilirsin 🎵'));
+  syncYt();
+}
+
+async function syncYt() {
+  const s = S.yt;
+  if (S.stage.mode !== 'yt') return;
+  if (!s?.current) {
+    if (ytPlayer) destroyYtPlayer();
+    return;
+  }
+  try {
+    await loadYtApi();
+  } catch {
+    return toast('YouTube oynatıcısı yüklenemedi.');
+  }
+  if (S.stage.mode !== 'yt' || !S.yt?.current) return;
+  if (!ytPlayer) {
+    ytPlayer = new YT.Player('yt-player', {
+      videoId: s.current.vid,
+      playerVars: { autoplay: 1, controls: 0, disablekb: 1, rel: 0, modestbranding: 1, playsinline: 1, start: Math.floor(ytTarget()) },
+      events: {
+        onReady: () => {
+          ytReady = true;
+          ytPlayer.setVolume(Number(localStorage.getItem('ytVol') || 60));
+          syncYt();
+        },
+        onStateChange: (e) => {
+          if (e.data === YT.PlayerState.ENDED && S.yt?.current) S.socket.emit('yt-ended', { vid: S.yt.current.vid });
+        },
+        onError: () => {
+          toast('Bu video gömülü oynatılamıyor, sıradakine geçiliyor.');
+          if (S.yt?.current) S.socket.emit('yt-control', { action: 'skip', vid: S.yt.current.vid });
+        },
+      },
+    });
+    return;
+  }
+  if (!ytReady) return;
+  const target = ytTarget();
+  const vid = ytPlayer.getVideoData?.().video_id;
+  ytApplying = Date.now();
+  if (vid !== s.current.vid) {
+    ytPlayer.loadVideoById(s.current.vid, target);
+    if (s.paused) setTimeout(() => ytPlayer?.pauseVideo(), 500);
+    return;
+  }
+  const cur = ytPlayer.getCurrentTime();
+  if (Math.abs(cur - target) > 2) ytPlayer.seekTo(target, true);
+  const st = ytPlayer.getPlayerState();
+  if (s.paused && st === YT.PlayerState.PLAYING) ytPlayer.pauseVideo();
+  if (!s.paused && st !== YT.PlayerState.PLAYING && st !== YT.PlayerState.BUFFERING) ytPlayer.playVideo();
+}
+setInterval(() => S.stage.mode === 'yt' && syncYt(), 3000);
+
+$('#yt-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const url = $('#yt-url').value.trim();
+  if (!url) return;
+  S.socket.emit('yt-add', { url }, (r) => {
+    if (r?.error) return toast(r.error);
+    $('#yt-url').value = '';
+  });
+});
+
+/* ---------------- Pomodoro ---------------- */
+function onPomo({ channel, state }) {
+  if (channel && channel !== S.myVoice) return;
+  const prev = S.pomo?.phase;
+  S.pomo = state;
+  if (state) S.pomoOffset = state.now - Date.now();
+  const phase = state?.phase;
+  if (phase === 'work' && prev !== 'work') {
+    if (!S.muted) {
+      S.muted = true;
+      S.pomoMuted = true;
+      applyMute();
+    }
+    beep(500, 0.3);
+    toast(`🍅 Çalışma zamanı! (${state.work} dk) Mikrofonlar kapatıldı.`, 5000);
+  } else if (phase !== 'work' && prev === 'work' && S.pomoMuted) {
+    S.muted = false;
+    S.pomoMuted = false;
+    applyMute();
+    if (phase === 'break') {
+      beep(800, 0.3);
+      toast(`☕ Mola! (${state.brk} dk) Mikrofonlar açıldı, sohbet edebilirsiniz.`, 5000);
+    }
+  }
+  renderPomo();
+  renderVoiceChannels();
+}
+
+function renderPomo() {
+  const bar = $('#pomo-bar');
+  const s = S.pomo;
+  if (!s) return bar.classList.add('hidden');
+  bar.classList.remove('hidden');
+  bar.className = 'pomo-bar ' + s.phase;
+  const left = (s.endsAt - (Date.now() + S.pomoOffset)) / 1000;
+  bar.replaceChildren(
+    el('span', null, `${s.phase === 'work' ? '🍅 Çalışma' : '☕ Mola'} ${fmtTime(left)} · Tur ${s.round}`),
+    button('⏹ Bitir', () => S.socket.emit('pomo-stop'), ''),
+  );
+}
+setInterval(() => S.pomo && renderPomo(), 1000);
+
+$('#pomo-btn').onclick = () => {
+  if (!S.myVoice) return toast('Önce bir ses odasına gir.');
+  if (S.pomo) {
+    return openDialog('🍅 Pomodoro', [el('p', 'hint', 'Odada bir sayaç çalışıyor. Bitirmek ister misin?')], [
+      { label: 'Devam', onClick: () => closeDialog() },
+      { label: 'Bitir', primary: true, onClick: () => { S.socket.emit('pomo-stop'); closeDialog(); } },
+    ]);
+  }
+  let work = 25, brk = 5;
+  const chips = el('div', 'chips');
+  for (const [w, b] of [[25, 5], [50, 10], [15, 3], [90, 15]]) {
+    const c = button(`${w} dk çalış · ${b} dk mola`, () => {
+      work = w;
+      brk = b;
+      chips.querySelectorAll('.chip').forEach((x) => x.classList.toggle('on', x === c));
+    });
+    if (w === 25) c.classList.add('on');
+    chips.appendChild(c);
+  }
+  openDialog('🍅 Ortak çalışma (Pomodoro)', [
+    chips,
+    el('p', 'hint', 'Odadaki herkes için aynı sayaç başlar. Çalışma süresinde herkesin mikrofonu otomatik kapanır, molada açılır.'),
+  ], [
+    { label: 'Vazgeç', onClick: () => closeDialog() },
+    { label: 'Başlat', primary: true, onClick: () => { S.socket.emit('pomo-start', { work, brk }); closeDialog(); } },
+  ]);
+};
+
+/* ---------------- Son 30 saniye klip ---------------- */
+// Odadaki tüm sesleri (sen + arkadaşların) sürekli son 30 saniyelik bir halkada tutar
+const clip = { node: null, mix: null, sink: null, buf: null, pos: 0, filled: false, rate: 48000 };
+function startClip() {
+  if (clip.node) return;
+  try {
+    const ctx = audioCtx();
+    clip.rate = ctx.sampleRate;
+    clip.buf = new Float32Array(Math.round(clip.rate * CLIP_SECONDS));
+    clip.pos = 0;
+    clip.filled = false;
+    clip.mix = ctx.createGain();
+    clip.node = ctx.createScriptProcessor(4096, 1, 1);
+    clip.sink = ctx.createGain();
+    clip.sink.gain.value = 0;
+    clip.node.onaudioprocess = (e) => {
+      const input = e.inputBuffer.getChannelData(0);
+      for (let i = 0; i < input.length; i++) {
+        clip.buf[clip.pos++] = input[i];
+        if (clip.pos >= clip.buf.length) { clip.pos = 0; clip.filled = true; }
+      }
+    };
+    clip.mix.connect(clip.node);
+    clip.node.connect(clip.sink).connect(ctx.destination);
+    if (srcNode) srcNode.connect(clip.mix);
+    for (const p of S.peers.values()) clipAddPeer(p);
+  } catch (err) {
+    console.warn('clip', err);
+  }
+}
+function stopClip() {
+  try {
+    clip.node?.disconnect();
+    clip.mix?.disconnect();
+    clip.sink?.disconnect();
+  } catch {}
+  clip.node = clip.mix = clip.sink = null;
+}
+function clipAddPeer(p) {
+  if (!clip.mix || !p.micStream || p.clipSrc) return;
+  try {
+    p.clipSrc = audioCtx().createMediaStreamSource(p.micStream);
+    p.clipSrc.connect(clip.mix);
+  } catch {}
+}
+
+function encodeWav(samples, rate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const v = new DataView(buf);
+  const str = (o, s) => [...s].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+  str(0, 'RIFF');
+  v.setUint32(4, 36 + samples.length * 2, true);
+  str(8, 'WAVE');
+  str(12, 'fmt ');
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);
+  v.setUint16(22, 1, true);
+  v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true);
+  v.setUint16(32, 2, true);
+  v.setUint16(34, 16, true);
+  str(36, 'data');
+  v.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([buf], { type: 'audio/wav' });
+}
+
+async function takeClip() {
+  if (!S.myVoice || !clip.buf) return toast('Klip almak için bir ses odasında olmalısın.');
+  // Halkayı doğru sıraya diz
+  const ordered = new Float32Array(clip.filled ? clip.buf.length : clip.pos);
+  if (clip.filled) {
+    ordered.set(clip.buf.subarray(clip.pos));
+    ordered.set(clip.buf.subarray(0, clip.pos), clip.buf.length - clip.pos);
+  } else ordered.set(clip.buf.subarray(0, clip.pos));
+  if (ordered.length < clip.rate) return toast('Klip için henüz yeterli ses yok.');
+  // 16 kHz'e indir (dosya küçük olsun)
+  const outRate = 16000;
+  const ratio = clip.rate / outRate;
+  const out = new Float32Array(Math.floor(ordered.length / ratio));
+  for (let i = 0; i < out.length; i++) out[i] = ordered[Math.floor(i * ratio)];
+  const time = new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }).replace(':', '.');
+  const name = `klip ${chName(S.myVoice)} ${time}.wav`;
+  const target = S.view.type === 'channel' ? S.view.id : 'klipler';
+  toast('🎬 Klip hazırlanıyor…', 20000);
+  try {
+    const f = await uploadBlob(encodeWav(out, outRate), name);
+    sendMessage(`🎬 ${S.myName} son ${Math.round(out.length / outRate)} saniyeyi klipledi!`, f, target);
+    toast(`🎬 Klip #${chName(target)} kanalına gönderildi.`);
+    beep(1200, 0.1);
+  } catch (err) {
+    toast('Klip gönderilemedi: ' + err.message);
+  }
+}
+$('#clip-btn').onclick = takeClip;
 
 /* ---------------- Sustur / Sağırlaştır ---------------- */
 function applyMute() {
@@ -860,6 +1811,7 @@ function toggleMute() {
     S.deafened = false;
     S.muted = false;
   } else S.muted = !S.muted;
+  S.pomoMuted = false;
   beep(S.muted ? 300 : 600, 0.08);
   applyMute();
 }
@@ -870,7 +1822,11 @@ function toggleDeafen() {
 }
 $('#mute-btn').onclick = toggleMute;
 $('#deafen-btn').onclick = toggleDeafen;
-desktop?.onHotkey((name) => (name === 'toggle-mute' ? toggleMute() : toggleDeafen()));
+desktop?.onHotkey((name) => {
+  if (name === 'toggle-mute') toggleMute();
+  else if (name === 'toggle-deafen') toggleDeafen();
+  else if (name === 'clip') takeClip();
+});
 
 /* ---------------- Ayarlar ---------------- */
 async function fillDevices() {
@@ -918,7 +1874,7 @@ $('#mic-select').onchange = (e) => {
 $('#speaker-select').onchange = (e) => {
   S.speakerId = e.target.value;
   localStorage.setItem('speakerId', S.speakerId);
-  for (const p of S.peers.values()) p.audio?.setSinkId?.(S.speakerId).catch(() => {});
+  for (const p of S.peers.values()) applyPeerAudio(p);
 };
 $('#noise-check').onchange = (e) => {
   S.noise = e.target.checked;

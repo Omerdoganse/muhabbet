@@ -43,23 +43,32 @@
         <div id="text-channels"></div>
         <div class="section-title">💌 ÖZEL MESAJLAR</div>
         <div id="dm-list"></div>
-        <div class="section-title">🔊 SES KANALLARI</div>
+        <div class="section-title with-btn">🔊 SES KANALLARI <button id="new-room-btn" class="mini-btn" title="Geçici oda aç">＋</button></div>
         <div id="voice-channels"></div>
       </div>
 
       <div id="voice-status" class="voice-status hidden">
-        <div>
-          <div class="vs-title">🟢 Seste</div>
-          <div id="vs-channel" class="vs-channel"></div>
+        <div class="vs-top">
+          <div>
+            <div class="vs-title">🟢 Seste</div>
+            <div id="vs-channel" class="vs-channel"></div>
+          </div>
+          <button id="leave-btn" class="icon-btn danger" title="Bağlantıyı kes">📞</button>
         </div>
-        <button id="leave-btn" class="icon-btn danger" title="Bağlantıyı kes">📞</button>
+        <div id="pomo-bar" class="pomo-bar hidden"></div>
+        <div class="vs-tools">
+          <button id="share-btn" class="tool-btn" title="Ekranını paylaş">🖥️</button>
+          <button id="yt-btn" class="tool-btn" title="Birlikte izle / dinle (YouTube)">📺</button>
+          <button id="pomo-btn" class="tool-btn" title="Pomodoro (ortak çalışma)">🍅</button>
+          <button id="clip-btn" class="tool-btn" title="Son 30 saniyeyi klip al (Ctrl+Shift+K)">🎬</button>
+        </div>
       </div>
 
       <div class="user-panel">
         <div class="avatar" id="my-avatar"></div>
-        <div class="user-info">
+        <div class="user-info" id="my-info" title="Durum ayarla">
           <div id="my-name" class="uname"></div>
-          <div class="ustatus">Çevrimiçi</div>
+          <div id="my-status" class="ustatus">Çevrimiçi</div>
         </div>
         <button id="mute-btn" class="icon-btn" title="Mikrofonu kapat (Ctrl+Shift+M)">🎤</button>
         <button id="deafen-btn" class="icon-btn" title="Sağırlaştır (Ctrl+Shift+D)">🎧</button>
@@ -74,7 +83,33 @@
           <div id="chat-title" class="chat-title"></div>
           <div id="chat-sub" class="chat-sub"></div>
         </div>
+        <div class="header-tools" id="header-tools">
+          <button id="poll-btn" class="tool-btn" title="Anket başlat">📊</button>
+          <button id="wheel-btn" class="tool-btn" title="Karar çarkı çevir">🎡</button>
+        </div>
       </header>
+
+      <!-- Sahne: ekran paylaşımı veya ortak izleme -->
+      <div id="stage" class="stage hidden">
+        <div class="stage-head">
+          <span id="stage-title" class="stage-title"></span>
+          <div class="stage-actions" id="stage-actions"></div>
+          <button id="stage-full" class="tool-btn" title="Tam ekran">⛶</button>
+          <button id="stage-close" class="tool-btn" title="Kapat">✖</button>
+        </div>
+        <div id="stage-body" class="stage-body">
+          <video id="stage-video" class="hidden" autoplay playsinline muted></video>
+          <div id="yt-wrap" class="hidden"><div id="yt-player"></div></div>
+        </div>
+        <div id="yt-panel" class="yt-panel hidden">
+          <form id="yt-form" class="yt-form">
+            <input id="yt-url" placeholder="YouTube linki yapıştır ve sıraya ekle…" autocomplete="off" />
+            <button class="btn-primary small" type="submit">Ekle</button>
+          </form>
+          <div id="yt-queue" class="yt-queue"></div>
+        </div>
+      </div>
+
       <div id="messages" class="messages"></div>
       <form id="chat-form" class="chat-form">
         <button type="button" id="attach-btn" class="round-btn" title="Fotoğraf / dosya gönder">📎</button>
@@ -118,6 +153,18 @@
       </div>
     </div>
   </div>
+
+  <!-- Genel pencere (anket, çark, durum, oda, pomodoro, ekran seçici) -->
+  <div id="dialog" class="modal hidden">
+    <div class="modal-card">
+      <h2 id="dialog-title"></h2>
+      <div id="dialog-body" class="dialog-body"></div>
+      <div class="modal-actions" id="dialog-actions"></div>
+    </div>
+  </div>
+
+  <!-- Ses odası önizlemesi -->
+  <div id="peek" class="peek hidden"></div>
 
   <!-- Büyük resim görüntüleyici -->
   <div id="lightbox" class="lightbox hidden"><img id="lightbox-img" alt="" /></div>
