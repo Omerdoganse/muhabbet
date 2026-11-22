@@ -5,6 +5,9 @@ dist/
 # Arkadaşa gönderilen exe ve sunucu linkini içeren klasör
 arkadasa at/
 
+# Kullanıcıların yüklediği dosyalar
+server/uploads/
+
 # Gizli / kişisel ayarlar
 client/app/config.js
 .env

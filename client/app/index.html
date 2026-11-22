@@ -7,37 +7,49 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- Arka plan süsleri -->
+  <div class="decor" aria-hidden="true">
+    <span style="top:8%;left:4%">☁️</span>
+    <span style="top:70%;left:2%;animation-delay:-2s">⭐</span>
+    <span style="top:12%;right:5%;animation-delay:-1s">🚀</span>
+    <span style="bottom:6%;right:8%;animation-delay:-3s">☁️</span>
+    <span style="top:45%;right:2%;animation-delay:-4s">✨</span>
+    <span style="bottom:12%;left:40%;animation-delay:-5s">💫</span>
+  </div>
+
   <!-- Giriş ekranı -->
   <div id="login" class="login">
     <form id="login-form" class="login-card">
-      <div class="logo">💬</div>
-      <h1>Muhabbet</h1>
-      <p class="sub">Arkadaşlarınla oyun oynarken konuş</p>
+      <div class="mascot">🤖</div>
+      <h1 class="brand">Muhabbet</h1>
+      <p class="sub">Arkadaşlarınla oyun oynarken konuş 🎮</p>
       <label>Kullanıcı adı
         <input id="name" maxlength="24" required autocomplete="off" placeholder="örn. Ali" />
       </label>
       <label>Sunucu adresi
-        <input id="server" required autocomplete="off" placeholder="http://localhost:3000" />
+        <input id="server" required autocomplete="off" placeholder="https://..." />
       </label>
-      <button type="submit" id="login-btn">Bağlan</button>
+      <button type="submit" id="login-btn" class="btn-primary">Bağlan 🚀</button>
       <p id="login-error" class="error"></p>
     </form>
   </div>
 
   <!-- Ana uygulama -->
   <div id="main" class="main hidden">
-    <aside class="sidebar">
-      <header class="server-name">Muhabbet <span id="conn-dot" class="dot"></span></header>
+    <aside class="sidebar panel">
+      <header class="server-name"><span class="brand">Muhabbet</span> <span id="conn-dot" class="dot"></span></header>
       <div class="channels">
-        <div class="section-title">YAZI KANALLARI</div>
+        <div class="section-title">💬 YAZI KANALLARI</div>
         <div id="text-channels"></div>
-        <div class="section-title">SES KANALLARI</div>
+        <div class="section-title">💌 ÖZEL MESAJLAR</div>
+        <div id="dm-list"></div>
+        <div class="section-title">🔊 SES KANALLARI</div>
         <div id="voice-channels"></div>
       </div>
 
       <div id="voice-status" class="voice-status hidden">
         <div>
-          <div class="vs-title">🟢 Ses Bağlandı</div>
+          <div class="vs-title">🟢 Seste</div>
           <div id="vs-channel" class="vs-channel"></div>
         </div>
         <button id="leave-btn" class="icon-btn danger" title="Bağlantıyı kes">📞</button>
@@ -55,24 +67,37 @@
       </div>
     </aside>
 
-    <section class="chat">
-      <header class="chat-header"><span class="hash">#</span><span id="chat-title"></span></header>
+    <section class="chat panel" id="chat">
+      <header class="chat-header">
+        <span id="chat-icon" class="chat-icon">#</span>
+        <div>
+          <div id="chat-title" class="chat-title"></div>
+          <div id="chat-sub" class="chat-sub"></div>
+        </div>
+      </header>
       <div id="messages" class="messages"></div>
       <form id="chat-form" class="chat-form">
+        <button type="button" id="attach-btn" class="round-btn" title="Fotoğraf / dosya gönder">📎</button>
+        <input type="file" id="file-input" multiple hidden />
         <input id="chat-input" autocomplete="off" maxlength="2000" />
+        <button type="button" id="emoji-btn" class="round-btn" title="Emoji">😊</button>
+        <button type="submit" class="send-btn" title="Gönder">➤</button>
+        <div id="emoji-panel" class="emoji-panel hidden"></div>
       </form>
+      <div id="drop-overlay" class="drop-overlay hidden">📎 Göndermek için bırak</div>
     </section>
 
-    <aside class="members">
-      <div class="section-title">ÇEVRİMİÇİ — <span id="online-count">0</span></div>
+    <aside class="members panel">
+      <div class="section-title">🌟 ÇEVRİMİÇİ — <span id="online-count">0</span></div>
       <div id="member-list"></div>
+      <p class="member-hint">Özel mesaj için birine tıkla</p>
     </aside>
   </div>
 
   <!-- Ayarlar -->
   <div id="settings" class="modal hidden">
     <div class="modal-card">
-      <h2>Ses Ayarları</h2>
+      <h2>⚙️ Ses Ayarları</h2>
       <label>Mikrofon
         <select id="mic-select"></select>
       </label>
@@ -88,11 +113,14 @@
         <b>Ctrl+Shift+M</b> mikrofonu aç/kapat · <b>Ctrl+Shift+D</b> sağırlaştır
       </p>
       <div class="modal-actions">
-        <button id="logout-btn" class="secondary">Çıkış yap</button>
-        <button id="settings-close">Tamam</button>
+        <button id="logout-btn" class="btn-ghost">Çıkış yap</button>
+        <button id="settings-close" class="btn-primary">Tamam</button>
       </div>
     </div>
   </div>
+
+  <!-- Büyük resim görüntüleyici -->
+  <div id="lightbox" class="lightbox hidden"><img id="lightbox-img" alt="" /></div>
 
   <div id="toast" class="toast hidden"></div>
   <script src="config.js" onerror="void 0"></script>

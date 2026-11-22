@@ -1,11 +1,13 @@
 'use strict';
-// Muhabbet istemcisi: yazılı sohbet (Socket.IO) + sesli sohbet (WebRTC, eşler arası)
+// Muhabbet istemcisi: yazılı sohbet + özel mesaj + dosya paylaşımı (Socket.IO/HTTP)
+// ve sesli sohbet (WebRTC, eşler arası)
 
 const $ = (s) => document.querySelector(s);
 const desktop = window.muhabbet || null;
 
 // Varsayılan sunucu adresi config.js'den gelir (GitHub'a yüklenmez)
 const DEFAULT_SERVER = window.MUHABBET_CONFIG?.defaultServer || 'http://localhost:3000';
+const MAX_FILE = 25 * 1024 * 1024;
 
 const ICE = {
   iceServers: [
@@ -14,17 +16,25 @@ const ICE = {
     { urls: 'stun:stun.cloudflare.com:3478' },
   ],
 };
-const COLORS = ['#5865f2', '#eb459e', '#3ba55c', '#faa61a', '#ed4245', '#9b59b6', '#1abc9c', '#e67e22'];
+const AVATARS = ['🐱', '🐶', '🦊', '🐼', '🐨', '🐯', '🦁', '🐸', '🐵', '🐰', '🐻', '🐧', '🦄', '🐙', '🐹', '🐲'];
+const AVATAR_BG = ['#ffd9e8', '#d4ebff', '#fff1b8', '#e6ddff', '#d3f5e3', '#ffe2c6'];
+const BUBBLES = ['c-blue', 'c-yellow', 'c-pink', 'c-purple', 'c-green', 'c-orange'];
+const NAME_COLORS = ['#3d8bfd', '#d49a00', '#e0457b', '#7c5cff', '#1f9e6b', '#e8772e'];
+const EMOJIS = ['😀', '😂', '🤣', '😊', '😍', '😎', '🤔', '😴', '😭', '😡', '🥳', '🤯', '👍', '👎', '👏', '🙏',
+  '🔥', '💯', '❤️', '💜', '🎮', '🕹️', '🏆', '⚔️', '🎯', '💀', '👀', '🚀', '⭐', '🎉', 'GG', '🍕'];
 
 const S = {
   socket: null,
+  serverUrl: '',
   me: null,
+  myName: '',
   users: [],
   textChannels: [],
   voiceChannels: [],
   history: {},
-  unread: new Set(),
-  currentText: null,
+  dms: JSON.parse(localStorage.getItem('dms') || '{}'), // karşı tarafın adı -> mesajlar
+  unread: {}, // görünüm anahtarı -> sayı
+  view: { type: 'channel', id: null },
   myVoice: null,
   muted: false,
   deafened: false,
@@ -39,19 +49,22 @@ const S = {
 };
 
 /* ---------------- Yardımcılar ---------------- */
-function colorFor(name) {
+function hash(name) {
   let h = 0;
   for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  return COLORS[h % COLORS.length];
+  return h;
 }
+const pick = (arr, name) => arr[hash(name) % arr.length];
+
 function avatarEl(user, size) {
   const a = document.createElement('div');
   a.className = 'avatar';
-  a.dataset.speak = user.id;
-  a.style.background = colorFor(user.name);
-  if (size) Object.assign(a.style, { width: size + 'px', height: size + 'px' });
-  a.textContent = user.name.slice(0, 1).toUpperCase();
-  if (S.speaking.has(user.id)) a.classList.add('speaking');
+  if (user.id) a.dataset.speak = user.id;
+  a.style.background = pick(AVATAR_BG, user.name);
+  if (size) Object.assign(a.style, { width: size + 'px', height: size + 'px', fontSize: Math.round(size * 0.58) + 'px' });
+  a.textContent = pick(AVATARS, user.name);
+  a.title = user.name;
+  if (user.id && S.speaking.has(user.id)) a.classList.add('speaking');
   return a;
 }
 function el(tag, cls, text) {
@@ -61,12 +74,12 @@ function el(tag, cls, text) {
   return e;
 }
 let toastTimer;
-function toast(msg) {
+function toast(msg, ms = 3500) {
   const t = $('#toast');
   t.textContent = msg;
   t.classList.remove('hidden');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => t.classList.add('hidden'), 3500);
+  toastTimer = setTimeout(() => t.classList.add('hidden'), ms);
 }
 let actx;
 function audioCtx() {
@@ -97,6 +110,10 @@ function loadScript(src) {
   });
 }
 const userById = (id) => S.users.find((u) => u.id === id);
+const userByName = (name) => S.users.find((u) => u.name === name && u.id !== S.me);
+const fmtSize = (b) => (b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(0) + ' KB' : (b / 1048576).toFixed(1) + ' MB');
+const viewKey = (v) => (v.type === 'channel' ? 'c:' + v.id : 'd:' + v.name);
+const absUrl = (u) => S.serverUrl + u;
 
 /* ---------------- Giriş ---------------- */
 $('#name').value = localStorage.getItem('name') || '';
@@ -114,6 +131,7 @@ $('#login-form').addEventListener('submit', async (e) => {
     await connect(name, server);
     localStorage.setItem('name', name);
     localStorage.setItem('server', server);
+    desktop?.setServer?.(S.serverUrl);
     audioCtx();
   } catch (err) {
     $('#login-error').textContent = err.message;
@@ -136,7 +154,7 @@ async function connect(name, url) {
     let first = true;
     const timer = setTimeout(() => {
       if (first) { socket.close(); reject(new Error('Sunucuya bağlanılamadı (zaman aşımı).')); }
-    }, 8000);
+    }, 60000); // uyuyan ücretsiz sunucunun uyanması için bekle
 
     socket.on('connect', () => {
       socket.emit('hello', { name });
@@ -153,11 +171,13 @@ async function connect(name, url) {
     });
     socket.on('users', onUsers);
     socket.on('chat', onChat);
+    socket.on('dm', onDm);
     socket.on('voice-peers', (ids) => ids.forEach(callPeer));
     socket.on('signal', onSignal);
     socket.on('peer-left', closePeer);
     socket.on('speaking', ({ id, speaking }) => setSpeaking(id, speaking));
     S.socket = socket;
+    S.serverUrl = url;
   });
 }
 
@@ -167,10 +187,13 @@ function onInit(d) {
   S.voiceChannels = d.voiceChannels;
   S.users = d.users;
   S.history = d.history;
-  if (!S.textChannels.includes(S.currentText)) S.currentText = S.textChannels[0];
+  if (S.view.type === 'channel' && !S.textChannels.includes(S.view.id)) S.view = { type: 'channel', id: S.textChannels[0] };
   $('#login').classList.add('hidden');
   $('#main').classList.remove('hidden');
   const me = userById(S.me);
+  S.myName = me.name;
+  // Geçmişteki kendi mesajlarımı sağa hizala (yeniden bağlanınca kimlik değişebilir, isme bak)
+  for (const list of Object.values(S.history)) for (const m of list) m.mine = m.userId === S.me || m.name === me.name;
   $('#my-name').textContent = me.name;
   const av = avatarEl(me);
   $('#my-avatar').replaceWith(av);
@@ -196,24 +219,75 @@ function onUsers(list) {
   S.users = list;
   renderVoiceChannels();
   renderMembers();
+  renderDmList();
+  if (S.view.type === 'dm') renderHeader();
   for (const p of S.peers.values()) applyPeerAudio(p);
 }
 
-/* ---------------- Yazılı sohbet ---------------- */
+/* ---------------- Mesajlar ---------------- */
+function currentList() {
+  return S.view.type === 'channel' ? S.history[S.view.id] || [] : S.dms[S.view.name] || [];
+}
+
+function addUnread(key) {
+  S.unread[key] = (S.unread[key] || 0) + 1;
+}
+
+function appendIfVisible(key, list, msg) {
+  if (viewKey(S.view) !== key) return false;
+  const box = $('#messages');
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 120;
+  box.querySelector('.empty')?.remove();
+  box.appendChild(messageEl(msg, list[list.length - 2]));
+  if (atBottom || msg.mine) box.scrollTop = box.scrollHeight;
+  // Resim yüklenince aşağı kaydır
+  box.lastElementChild.querySelectorAll('img').forEach((img) => img.addEventListener('load', () => {
+    if (atBottom || msg.mine) box.scrollTop = box.scrollHeight;
+  }));
+  return true;
+}
+
 function onChat(msg) {
-  (S.history[msg.channel] ||= []).push(msg);
-  if (msg.channel === S.currentText) {
-    const box = $('#messages');
-    const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
-    box.querySelector('.empty')?.remove();
-    const list = S.history[msg.channel];
-    box.appendChild(messageEl(msg, list[list.length - 2]));
-    if (atBottom || msg.userId === S.me) box.scrollTop = box.scrollHeight;
-  } else {
-    S.unread.add(msg.channel);
+  msg.mine = msg.userId === S.me;
+  const list = (S.history[msg.channel] ||= []);
+  list.push(msg);
+  const key = 'c:' + msg.channel;
+  if (!appendIfVisible(key, list, msg)) {
+    addUnread(key);
     renderTextChannels();
   }
-  if (msg.userId !== S.me && !document.hasFocus()) beep(900, 0.08);
+  if (!msg.mine && !document.hasFocus()) beep(900, 0.08);
+}
+
+function onDm(msg) {
+  msg.mine = msg.from === S.me;
+  const other = msg.mine ? msg.toName : msg.fromName;
+  const list = (S.dms[other] ||= []);
+  list.push({ userId: msg.from, name: msg.fromName, text: msg.text, file: msg.file, ts: msg.ts, mine: msg.mine });
+  if (list.length > 200) list.splice(0, list.length - 200);
+  saveDms();
+  const key = 'd:' + other;
+  if (!appendIfVisible(key, list, list[list.length - 1])) {
+    addUnread(key);
+    if (!msg.mine) toast(`💌 ${msg.fromName}: ${msg.text || '📎 dosya'}`);
+  }
+  renderDmList();
+  if (!msg.mine) beep(1000, 0.1);
+}
+
+function saveDms() {
+  try { localStorage.setItem('dms', JSON.stringify(S.dms)); } catch {}
+}
+
+function sendMessage(text, file) {
+  if (!S.socket) return;
+  if (S.view.type === 'channel') {
+    S.socket.emit('chat', { channel: S.view.id, text, file });
+  } else {
+    const u = userByName(S.view.name);
+    if (!u) return toast(`${S.view.name} şu an çevrimdışı.`);
+    S.socket.emit('dm', { to: u.id, text, file });
+  }
 }
 
 $('#chat-form').addEventListener('submit', (e) => {
@@ -221,8 +295,9 @@ $('#chat-form').addEventListener('submit', (e) => {
   const input = $('#chat-input');
   const text = input.value.trim();
   if (!text) return;
-  S.socket.emit('chat', { channel: S.currentText, text });
+  sendMessage(text);
   input.value = '';
+  $('#emoji-panel').classList.add('hidden');
 });
 
 function linkify(text, parent) {
@@ -240,59 +315,236 @@ function linkify(text, parent) {
   parent.appendChild(document.createTextNode(text.slice(last)));
 }
 
+function fileEl(file) {
+  if (file.image) {
+    const img = el('img', 'msg-img');
+    img.src = absUrl(file.url);
+    img.alt = file.name;
+    img.loading = 'lazy';
+    img.onclick = () => {
+      $('#lightbox-img').src = img.src;
+      $('#lightbox').classList.remove('hidden');
+    };
+    return img;
+  }
+  const a = el('a', 'file-card');
+  a.href = absUrl(file.url) + '?name=' + encodeURIComponent(file.name);
+  a.download = file.name;
+  const info = el('div');
+  info.append(el('div', 'f-name', file.name), el('div', 'f-size', fmtSize(file.size)));
+  a.append(el('span', 'f-ico', '📄'), info, el('span', 'f-dl', '⬇️'));
+  return a;
+}
+
+const isOnlyEmoji = (t) => t.length <= 8 && /^(\p{Extended_Pictographic}|‍|️|\s)+$/u.test(t);
+
 function messageEl(msg, prev) {
-  const cont = prev && prev.userId === msg.userId && msg.ts - prev.ts < 5 * 60 * 1000;
-  const row = el('div', 'msg' + (cont ? ' cont' : ''));
-  row.appendChild(avatarEl({ id: msg.userId, name: msg.name }, 40));
+  const sender = msg.mine ? '__me' : msg.name;
+  const prevSender = prev ? (prev.mine ? '__me' : prev.name) : null;
+  const cont = prev && prevSender === sender && msg.ts - prev.ts < 5 * 60 * 1000;
+  const row = el('div', 'msg' + (cont ? ' cont' : '') + (msg.mine ? ' mine' : ''));
+  row.appendChild(avatarEl({ id: msg.userId, name: msg.name }, 36));
   const body = el('div', 'msg-body');
   if (!cont) {
     const head = el('div', 'msg-head');
-    const n = el('span', 'msg-name', msg.name);
-    n.style.color = colorFor(msg.name);
+    const n = el('span', 'msg-name', msg.mine ? 'Sen' : msg.name);
+    n.style.color = pick(NAME_COLORS, msg.name);
     head.append(n, el('span', 'msg-time', new Date(msg.ts).toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })));
     body.appendChild(head);
   }
-  const t = el('div', 'msg-text');
-  linkify(msg.text, t);
-  body.appendChild(t);
+  if (msg.text) {
+    const b = el('div', 'bubble ' + pick(BUBBLES, msg.name) + (isOnlyEmoji(msg.text) ? ' only-emoji' : ''));
+    linkify(msg.text, b);
+    body.appendChild(b);
+  }
+  if (msg.file) body.appendChild(fileEl(msg.file));
   row.appendChild(body);
   return row;
+}
+
+function renderHeader() {
+  const icon = $('#chat-icon');
+  const input = $('#chat-input');
+  if (S.view.type === 'channel') {
+    icon.className = 'chat-icon';
+    icon.style.background = '';
+    icon.textContent = '#';
+    $('#chat-title').textContent = S.view.id;
+    $('#chat-sub').textContent = 'Herkese açık kanal';
+    input.placeholder = `#${S.view.id} kanalına mesaj yaz…`;
+    input.disabled = false;
+  } else {
+    const online = !!userByName(S.view.name);
+    icon.className = 'chat-icon avatar';
+    icon.style.background = pick(AVATAR_BG, S.view.name);
+    icon.textContent = pick(AVATARS, S.view.name);
+    $('#chat-title').textContent = S.view.name;
+    $('#chat-sub').textContent = online ? '🟢 Çevrimiçi · özel sohbet' : '⚪ Çevrimdışı';
+    input.placeholder = online ? `${S.view.name} kişisine özel mesaj…` : `${S.view.name} şu an çevrimdışı`;
+    input.disabled = !online;
+  }
 }
 
 function renderMessages() {
   const box = $('#messages');
   box.replaceChildren();
-  const list = S.history[S.currentText] || [];
-  if (!list.length) box.appendChild(el('div', 'empty', `#${S.currentText} kanalının başlangıcı. İlk mesajı sen yaz!`));
+  const list = currentList();
+  if (!list.length) {
+    const e = el('div', 'empty');
+    e.appendChild(el('span', 'big', S.view.type === 'channel' ? '💬' : '💌'));
+    e.appendChild(document.createTextNode(
+      S.view.type === 'channel'
+        ? `#${S.view.id} kanalının başlangıcı. İlk mesajı sen yaz!`
+        : `${S.view.name} ile özel sohbetin başlangıcı. Bu mesajları sadece ikiniz görebilir.`,
+    ));
+    box.appendChild(e);
+  }
   list.forEach((m, i) => box.appendChild(messageEl(m, list[i - 1])));
   box.scrollTop = box.scrollHeight;
-  $('#chat-title').textContent = S.currentText;
-  $('#chat-input').placeholder = `#${S.currentText} kanalına mesaj gönder`;
+  box.querySelectorAll('img').forEach((img) => img.addEventListener('load', () => (box.scrollTop = box.scrollHeight), { once: true }));
+  renderHeader();
 }
+
+function openView(view) {
+  S.view = view;
+  delete S.unread[viewKey(view)];
+  renderTextChannels();
+  renderDmList();
+  renderMessages();
+  if (!$('#chat-input').disabled) $('#chat-input').focus();
+}
+
+/* ---------------- Dosya gönderme ---------------- */
+async function uploadFiles(files) {
+  for (const f of files) {
+    if (f.size > MAX_FILE) { toast(`${f.name} çok büyük (en fazla 25 MB).`); continue; }
+    if (S.view.type === 'dm' && !userByName(S.view.name)) { toast(`${S.view.name} şu an çevrimdışı.`); return; }
+    toast(`📤 Yükleniyor: ${f.name || 'resim'}…`, 60000);
+    try {
+      const r = await fetch(S.serverUrl + '/upload', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'X-Filename': encodeURIComponent(f.name || 'resim.png'),
+          'X-Socket-Id': S.socket.id,
+        },
+        body: f,
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'Yükleme hatası');
+      sendMessage('', j);
+      $('#toast').classList.add('hidden');
+    } catch (err) {
+      toast('Gönderilemedi: ' + err.message);
+    }
+  }
+}
+
+$('#attach-btn').onclick = () => $('#file-input').click();
+$('#file-input').onchange = (e) => {
+  uploadFiles([...e.target.files]);
+  e.target.value = '';
+};
+// Panodan yapıştır (Ctrl+V ile ekran görüntüsü gönder)
+$('#chat-input').addEventListener('paste', (e) => {
+  const files = [...(e.clipboardData?.files || [])];
+  if (files.length) {
+    e.preventDefault();
+    uploadFiles(files);
+  }
+});
+// Sürükle-bırak
+let dragDepth = 0;
+const chatEl = $('#chat');
+chatEl.addEventListener('dragenter', (e) => {
+  if (![...e.dataTransfer.types].includes('Files')) return;
+  dragDepth++;
+  $('#drop-overlay').classList.remove('hidden');
+});
+chatEl.addEventListener('dragleave', () => {
+  if (--dragDepth <= 0) { dragDepth = 0; $('#drop-overlay').classList.add('hidden'); }
+});
+chatEl.addEventListener('dragover', (e) => e.preventDefault());
+chatEl.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  $('#drop-overlay').classList.add('hidden');
+  if (e.dataTransfer.files.length) uploadFiles([...e.dataTransfer.files]);
+});
+$('#lightbox').onclick = () => $('#lightbox').classList.add('hidden');
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    $('#lightbox').classList.add('hidden');
+    $('#emoji-panel').classList.add('hidden');
+  }
+});
+
+/* ---------------- Emoji ---------------- */
+for (const em of EMOJIS) {
+  const b = el('button', null, em);
+  b.type = 'button';
+  b.onclick = () => {
+    const input = $('#chat-input');
+    const pos = input.selectionStart ?? input.value.length;
+    input.value = input.value.slice(0, pos) + em + input.value.slice(pos);
+    input.focus();
+    input.selectionStart = input.selectionEnd = pos + em.length;
+  };
+  $('#emoji-panel').appendChild(b);
+}
+$('#emoji-btn').onclick = () => $('#emoji-panel').classList.toggle('hidden');
 
 /* ---------------- Arayüz ---------------- */
 function renderAll() {
   renderTextChannels();
+  renderDmList();
   renderVoiceChannels();
   renderMembers();
   renderMessages();
   updateButtons();
 }
 
+function badge(key) {
+  const n = S.unread[key];
+  return n ? el('span', 'badge', n > 99 ? '99+' : String(n)) : null;
+}
+
 function renderTextChannels() {
   const box = $('#text-channels');
   box.replaceChildren();
   for (const ch of S.textChannels) {
-    const d = el('div', 'channel' + (ch === S.currentText ? ' active' : ''));
+    const active = S.view.type === 'channel' && S.view.id === ch;
+    const d = el('div', 'channel' + (active ? ' active' : ''));
     d.append(el('span', 'ico', '#'), el('span', null, ch));
-    if (S.unread.has(ch)) d.appendChild(el('span', 'unread'));
-    d.onclick = () => {
-      S.currentText = ch;
-      S.unread.delete(ch);
-      renderTextChannels();
-      renderMessages();
-      $('#chat-input').focus();
-    };
+    const b = badge('c:' + ch);
+    if (b) d.appendChild(b);
+    d.onclick = () => openView({ type: 'channel', id: ch });
+    box.appendChild(d);
+  }
+}
+
+function renderDmList() {
+  const box = $('#dm-list');
+  box.replaceChildren();
+  const names = Object.keys(S.dms).sort((a, b) => {
+    const la = S.dms[a].at(-1)?.ts || 0;
+    const lb = S.dms[b].at(-1)?.ts || 0;
+    return lb - la;
+  });
+  if (S.view.type === 'dm' && !names.includes(S.view.name)) names.unshift(S.view.name);
+  if (!names.length) {
+    box.appendChild(el('div', 'empty-small', 'Sağdan birine tıkla 👉'));
+    return;
+  }
+  for (const name of names) {
+    const active = S.view.type === 'dm' && S.view.name === name;
+    const d = el('div', 'channel' + (active ? ' active' : ''));
+    const u = userByName(name);
+    d.append(avatarEl({ id: u?.id, name }), el('span', null, name));
+    const b = badge('d:' + name);
+    d.appendChild(b || el('span', 'online-dot' + (u ? ' on' : '')));
+    if (!b) d.lastChild.style.marginLeft = 'auto';
+    d.onclick = () => openView({ type: 'dm', name });
     box.appendChild(d);
   }
 }
@@ -344,11 +596,13 @@ function renderMembers() {
   box.replaceChildren();
   $('#online-count').textContent = S.users.length;
   for (const u of S.users) {
-    const row = el('div', 'member');
+    const isMe = u.id === S.me;
+    const row = el('div', 'member' + (isMe ? ' me' : ''));
     const info = el('div');
-    info.appendChild(el('div', null, u.name + (u.id === S.me ? ' (sen)' : '')));
-    if (u.voice) info.appendChild(el('div', 'sub2', '🔊 ' + u.voice));
+    info.appendChild(el('div', 'm-name', u.name + (isMe ? ' (sen)' : '')));
+    info.appendChild(el('div', 'sub2', u.voice ? '🔊 ' + u.voice : isMe ? 'Çevrimiçi' : '💌 Mesaj gönder'));
     row.append(avatarEl(u), info);
+    if (!isMe) row.onclick = () => openView({ type: 'dm', name: u.name });
     box.appendChild(row);
   }
 }
@@ -485,7 +739,7 @@ async function joinVoice(ch) {
   try {
     await ensureMic();
   } catch (err) {
-    toast('Mikrofona erişilemedi: ' + micErrorText(err));
+    toast('Mikrofona erişilemedi: ' + micErrorText(err), 6000);
     return;
   }
   if (S.myVoice) dropAllPeers();
@@ -647,7 +901,7 @@ $('#settings-btn').onclick = async () => {
   try {
     await ensureMic(); // cihaz adlarını görmek ve seviye göstergesi için
   } catch (err) {
-    toast('Mikrofona erişilemedi: ' + micErrorText(err));
+    toast('Mikrofona erişilemedi: ' + micErrorText(err), 6000);
   }
   fillDevices();
 };
@@ -659,7 +913,7 @@ $('#settings-close').onclick = () => {
 $('#mic-select').onchange = (e) => {
   S.micId = e.target.value;
   localStorage.setItem('micId', S.micId);
-  restartMic().catch((err) => toast('Mikrofon değiştirilemedi: ' + err.message));
+  restartMic().catch((err) => toast('Mikrofon değiştirilemedi: ' + micErrorText(err)));
 };
 $('#speaker-select').onchange = (e) => {
   S.speakerId = e.target.value;

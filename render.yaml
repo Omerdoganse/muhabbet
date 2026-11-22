@@ -1,0 +1,11 @@
+# Render.com kurulum dosyası (Blueprint)
+# Render'da: New -> Blueprint -> bu repoyu seç -> Apply
+services:
+  - type: web
+    name: muhabbet
+    runtime: node
+    plan: free
+    buildCommand: npm install --prefix server
+    startCommand: node server/server.js
+    healthCheckPath: /health
+    autoDeploy: true
