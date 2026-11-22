@@ -45,9 +45,11 @@ function createWindow() {
     },
   });
 
-  // Mikrofon iznini otomatik ver
-  session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(permission === 'media'));
-  session.defaultSession.setPermissionCheckHandler((_wc, permission) => permission === 'media');
+  // Mikrofon ve ekran paylaşımı izinlerini otomatik ver
+  // (ekranın hangisinin paylaşılacağını yine de kullanıcı seçer)
+  const ALLOWED = new Set(['media', 'display-capture']);
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, cb) => cb(ALLOWED.has(permission)));
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => ALLOWED.has(permission));
 
   // Ekran paylaşımı: hangi ekran/pencerenin paylaşılacağını uygulamadaki seçiciden sor
   session.defaultSession.setDisplayMediaRequestHandler(async (_request, callback) => {

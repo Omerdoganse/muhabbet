@@ -1343,7 +1343,9 @@ function applyPeerAudio(p) {
 /* ---------------- Ekran paylaşımı ---------------- */
 desktop?.onPickSource?.((list) => pickSource(list));
 
+let pickerShown = false;
 function pickSource(list) {
+  pickerShown = true;
   let chosen = list.find((s) => s.id.startsWith('screen')) || list[0];
   const grid = el('div', 'src-grid');
   for (const s of list) {
@@ -1381,8 +1383,13 @@ async function startShare() {
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: true });
   } catch (err) {
-    if (err.name !== 'NotAllowedError' && err.name !== 'AbortError') toast('Ekran paylaşılamadı: ' + err.message);
+    // Seçiciden vazgeçmek sessiz geçer; seçici hiç açılmadıysa nedenini söyle
+    if (err.name === 'NotAllowedError' && !pickerShown) {
+      toast('Ekran paylaşma izni verilmedi. Arkadaşından yeni Muhabbet.exe\'yi almasını iste (veya sen yeniden indir).', 7000);
+    } else if (err.name !== 'NotAllowedError' && err.name !== 'AbortError') toast('Ekran paylaşılamadı: ' + err.message);
     return;
+  } finally {
+    pickerShown = false;
   }
   if (!S.myVoice) return stream.getTracks().forEach((t) => t.stop());
   S.screenStream = stream;
