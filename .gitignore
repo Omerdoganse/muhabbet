@@ -1,0 +1,18 @@
+# Bağımlılıklar ve derleme çıktıları
+node_modules/
+dist/
+
+# Arkadaşa gönderilen exe ve sunucu linkini içeren klasör
+arkadasa at/
+
+# Gizli / kişisel ayarlar
+client/app/config.js
+.env
+.env.*
+
+# Editör ve yerel araç dosyaları
+.claude/
+.vscode/
+*.log
+Thumbs.db
+desktop.ini

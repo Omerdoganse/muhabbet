@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Muhabbet</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Giriş ekranı -->
+  <div id="login" class="login">
+    <form id="login-form" class="login-card">
+      <div class="logo">💬</div>
+      <h1>Muhabbet</h1>
+      <p class="sub">Arkadaşlarınla oyun oynarken konuş</p>
+      <label>Kullanıcı adı
+        <input id="name" maxlength="24" required autocomplete="off" placeholder="örn. Ali" />
+      </label>
+      <label>Sunucu adresi
+        <input id="server" required autocomplete="off" placeholder="http://localhost:3000" />
+      </label>
+      <button type="submit" id="login-btn">Bağlan</button>
+      <p id="login-error" class="error"></p>
+    </form>
+  </div>
+
+  <!-- Ana uygulama -->
+  <div id="main" class="main hidden">
+    <aside class="sidebar">
+      <header class="server-name">Muhabbet <span id="conn-dot" class="dot"></span></header>
+      <div class="channels">
+        <div class="section-title">YAZI KANALLARI</div>
+        <div id="text-channels"></div>
+        <div class="section-title">SES KANALLARI</div>
+        <div id="voice-channels"></div>
+      </div>
+
+      <div id="voice-status" class="voice-status hidden">
+        <div>
+          <div class="vs-title">🟢 Ses Bağlandı</div>
+          <div id="vs-channel" class="vs-channel"></div>
+        </div>
+        <button id="leave-btn" class="icon-btn danger" title="Bağlantıyı kes">📞</button>
+      </div>
+
+      <div class="user-panel">
+        <div class="avatar" id="my-avatar"></div>
+        <div class="user-info">
+          <div id="my-name" class="uname"></div>
+          <div class="ustatus">Çevrimiçi</div>
+        </div>
+        <button id="mute-btn" class="icon-btn" title="Mikrofonu kapat (Ctrl+Shift+M)">🎤</button>
+        <button id="deafen-btn" class="icon-btn" title="Sağırlaştır (Ctrl+Shift+D)">🎧</button>
+        <button id="settings-btn" class="icon-btn" title="Ayarlar">⚙️</button>
+      </div>
+    </aside>
+
+    <section class="chat">
+      <header class="chat-header"><span class="hash">#</span><span id="chat-title"></span></header>
+      <div id="messages" class="messages"></div>
+      <form id="chat-form" class="chat-form">
+        <input id="chat-input" autocomplete="off" maxlength="2000" />
+      </form>
+    </section>
+
+    <aside class="members">
+      <div class="section-title">ÇEVRİMİÇİ — <span id="online-count">0</span></div>
+      <div id="member-list"></div>
+    </aside>
+  </div>
+
+  <!-- Ayarlar -->
+  <div id="settings" class="modal hidden">
+    <div class="modal-card">
+      <h2>Ses Ayarları</h2>
+      <label>Mikrofon
+        <select id="mic-select"></select>
+      </label>
+      <label>Hoparlör
+        <select id="speaker-select"></select>
+      </label>
+      <label class="check"><input type="checkbox" id="noise-check" checked /> Gürültü engelleme ve yankı iptali</label>
+      <label>Mikrofon seviyesi
+        <div class="meter"><div id="mic-meter"></div></div>
+      </label>
+      <p class="hint">
+        Kısayollar (oyun içindeyken de çalışır):<br />
+        <b>Ctrl+Shift+M</b> mikrofonu aç/kapat · <b>Ctrl+Shift+D</b> sağırlaştır
+      </p>
+      <div class="modal-actions">
+        <button id="logout-btn" class="secondary">Çıkış yap</button>
+        <button id="settings-close">Tamam</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="config.js" onerror="void 0"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>
