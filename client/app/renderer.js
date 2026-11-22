@@ -1387,6 +1387,8 @@ function pickSource(list) {
   audio.type = 'checkbox';
   const lab = el('label', 'check');
   lab.append(audio, document.createTextNode(' Bilgisayar sesini de paylaş (oyun/müzik)'));
+  // Bilgisayar sesini paylaşmayı sadece Windows destekliyor
+  if (desktop?.platform && desktop.platform !== 'win32') lab.classList.add('hidden');
   return openDialog('🖥️ Neyi paylaşmak istersin?', [
     grid, lab,
     el('p', 'hint', 'İpucu: Ses paylaşırken kulaklık kullan, yoksa arkadaşların kendi seslerini geri duyabilir.'),

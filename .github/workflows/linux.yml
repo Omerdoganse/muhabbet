@@ -1,0 +1,47 @@
+# Linux sürümünü (AppImage) GitHub'ın Ubuntu bilgisayarında oluşturur ve test eder.
+# Çalıştırmak için: GitHub > Actions > "Linux sürümü" > Run workflow
+name: Linux sürümü
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Bağımlılıkları kur
+        run: npm ci
+
+      - name: AppImage oluştur
+        run: npx electron-builder --linux AppImage --publish never
+
+      - name: Uygulamayı açıp test et
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq xvfb > /dev/null
+          APP=$(ls dist/*.AppImage)
+          chmod +x "$APP"
+          xvfb-run -a "$APP" --appimage-extract-and-run --no-sandbox --remote-debugging-port=9222 > app.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:9222/json | grep -q '"type": "page"'; then break; fi
+            sleep 2
+          done
+          echo "--- Açık sayfalar ---"
+          curl -s http://127.0.0.1:9222/json | tee pages.json
+          grep -q 'Muhabbet' pages.json || (echo "Uygulama açılmadı"; cat app.log; exit 1)
+          echo "Uygulama Linux'ta başarıyla açıldı"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Muhabbet-Linux
+          path: client/dist/*.AppImage
+          retention-days: 7

@@ -8,6 +8,11 @@ const vm = require('vm');
 
 let win;
 
+// Linux: yeni masaüstlerinde (Wayland) ekran paylaşımı PipeWire üzerinden çalışır
+if (process.platform === 'linux') {
+  app.commandLine.appendSwitch('enable-features', 'WebRTCPipeWireCapturer');
+}
+
 const settingsFile = () => path.join(app.getPath('userData'), 'settings.json');
 function readSettings() {
   try { return JSON.parse(fs.readFileSync(settingsFile(), 'utf8')); } catch { return {}; }
@@ -71,8 +76,9 @@ function createWindow() {
     const src = choice && sources.find((s) => s.id === choice.id);
     try {
       if (!src) return callback({});
-      // "loopback" = bilgisayarın sesi (Windows)
-      callback(choice.audio ? { video: src, audio: 'loopback' } : { video: src });
+      // "loopback" = bilgisayarın sesi (sadece Windows destekliyor)
+      const withAudio = choice.audio && process.platform === 'win32';
+      callback(withAudio ? { video: src, audio: 'loopback' } : { video: src });
     } catch {}
   });
 

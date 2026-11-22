@@ -2,7 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('muhabbet', {
   isDesktop: true,
-  version: 2,
+  version: 3,
+  platform: process.platform, // 'win32' | 'linux' | 'darwin'
   onHotkey: (cb) => ipcRenderer.on('hotkey', (_e, name) => cb(name)),
   setServer: (url) => ipcRenderer.send('set-server', url),
   // Ekran paylaşımı seçicisi: ana süreç kaynak listesini yollar, arayüz seçimi geri yollar
