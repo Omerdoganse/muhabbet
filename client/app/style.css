@@ -104,6 +104,12 @@ input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 4px r
 .channel .online-dot { width: 8px; height: 8px; border-radius: 50%; background: #d4cfe3; }
 .channel .online-dot.on { background: var(--green); }
 .empty-small { color: var(--muted); font-size: 13px; padding: 4px 10px; }
+.dm-x {
+  display: none; border: none; background: #ffe1ea; color: var(--red); width: 22px; height: 22px; border-radius: 8px;
+  font-size: 11px; margin-left: 6px; flex-shrink: 0;
+}
+.channel:hover .dm-x { display: grid; place-items: center; }
+.dm-x:hover { background: var(--red); color: #fff; }
 
 .voice-users { padding-left: 26px; }
 .voice-user { display: flex; align-items: center; gap: 8px; padding: 4px 8px; border-radius: 12px; font-size: 14px; position: relative; }

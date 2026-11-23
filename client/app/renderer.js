@@ -37,6 +37,7 @@ const S = {
   voiceChannels: [],
   history: {},
   dms: JSON.parse(localStorage.getItem('dms') || '{}'), // karşı tarafın adı -> mesajlar
+  dmBlocked: new Set(JSON.parse(localStorage.getItem('dmBlocked') || '[]')), // özel mesajı engellenen isimler
   lastRead: JSON.parse(localStorage.getItem('lastRead') || '{}'), // kanal -> zaman
   unread: {}, // görünüm anahtarı -> sayı
   view: { type: 'channel', id: 'genel' },
@@ -366,6 +367,7 @@ function onMsgUpdate(msg) {
 
 function onDm(msg) {
   msg.mine = msg.from === S.me;
+  if (!msg.mine && S.dmBlocked.has(msg.fromName)) return; // engellenen kişiden gelen özel mesaj gösterilmez
   const other = msg.mine ? msg.toName : msg.fromName;
   const list = (S.dms[other] ||= []);
   list.push({ userId: msg.from, name: msg.fromName, text: msg.text, file: msg.file, ts: msg.ts, mine: msg.mine });
@@ -925,8 +927,50 @@ function renderDmList() {
     const dot = b || el('span', 'online-dot' + (u ? ' on' : ''));
     if (!b) dot.style.marginLeft = 'auto';
     d.appendChild(dot);
+    d.appendChild(button('✖', (e) => { e.stopPropagation(); removeDm(name); }, 'dm-x', 'Listeden kaldır / engelle'));
     d.onclick = () => openView({ type: 'dm', name });
     box.appendChild(d);
+  }
+}
+
+// Özel mesaj konuşmasını listeden kaldır (mesajlar sadece bu bilgisayardan silinir), istenirse engelle
+function removeDm(name) {
+  const drop = (block) => {
+    delete S.dms[name];
+    delete S.unread['d:' + name];
+    saveDms();
+    if (block) {
+      S.dmBlocked.add(name);
+      localStorage.setItem('dmBlocked', JSON.stringify([...S.dmBlocked]));
+    }
+    closeDialog();
+    if (S.view.type === 'dm' && S.view.name === name) openView({ type: 'channel', id: 'genel' });
+    else renderDmList();
+    toast(block ? `⛔ ${name} engellendi, artık sana özel mesaj gelmeyecek.` : `${name} listeden kaldırıldı.`);
+  };
+  openDialog(`💌 ${name}`, [
+    el('p', 'hint', `"Listeden kaldır" konuşmayı ve mesajlarını sadece senin bilgisayarından siler. ${name} sana yeniden yazarsa tekrar görünür.`),
+    el('p', 'hint', `"Kaldır ve engelle" seçersen ${name} adlı kişiden gelen özel mesajlar sana hiç gösterilmez. Engeli Ayarlar'dan kaldırabilirsin.`),
+  ], [
+    { label: 'Vazgeç', onClick: () => closeDialog() },
+    { label: 'Kaldır ve engelle', onClick: () => drop(true) },
+    { label: 'Listeden kaldır', primary: true, onClick: () => drop(false) },
+  ]);
+}
+
+// Ayarlarda engellenenler listesi
+function renderBlocked() {
+  const box = $('#blocked-list');
+  if (!box) return;
+  box.replaceChildren();
+  if (!S.dmBlocked.size) return box.appendChild(el('span', 'hint', 'Engellediğin kimse yok.'));
+  for (const name of S.dmBlocked) {
+    box.appendChild(button(`${name} ✖`, () => {
+      S.dmBlocked.delete(name);
+      localStorage.setItem('dmBlocked', JSON.stringify([...S.dmBlocked]));
+      renderBlocked();
+      toast(`${name} engeli kaldırıldı.`);
+    }, 'chip', 'Engeli kaldır'));
   }
 }
 
@@ -1981,6 +2025,7 @@ async function fillDevices() {
 $('#settings-btn').onclick = async () => {
   S.settingsOpen = true;
   $('#settings').classList.remove('hidden');
+  renderBlocked();
   $('#noise-check').checked = S.noise;
   try {
     await ensureMic(); // cihaz adlarını görmek ve seviye göstergesi için
